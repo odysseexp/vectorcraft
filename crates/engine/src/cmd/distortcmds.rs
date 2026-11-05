@@ -1276,6 +1276,7 @@ pub(crate) fn perspective_rewrite(s: &Session, cmd: &str, params: &Value) -> Opt
         "shape.ellipse",
         "shape.polygon",
         "shape.star",
+        "shape.box3d",
         "shape.line",
         "shape.rectangularGrid",
         "shape.arc",

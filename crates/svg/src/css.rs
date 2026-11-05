@@ -659,8 +659,10 @@ fn corners(path: &PathData, live: Option<&LiveShape>) -> Option<Corners> {
     // Sizes and radii in document units.
     match live.map(LiveShape::folded).as_ref() {
         // CSS rounds corners only: an inverted round or chamfered corner has no border radius.
-        Some(LiveShape::Rectangle { w, h, radii, kinds, xf })
-            if upright(xf) && radii.iter().zip(kinds).all(|(r, k)| *r <= 0.0 || *k == CornerKind::Round) =>
+        Some(LiveShape::Rectangle { w, h, radii, kinds, xf, arc })
+            if upright(xf)
+                && *arc == vectorcraft_doc::ShapeArc::default()
+                && radii.iter().zip(kinds).all(|(r, k)| *r <= 0.0 || *k == CornerKind::Round) =>
         {
             // The radii as drawn: no two neighbours' cuts add up to more than their side, so CSS
             // draws them as they are.
@@ -673,12 +675,18 @@ fn corners(path: &PathData, live: Option<&LiveShape>) -> Option<Corners> {
                 Some(Corners::Round(radii.to_vec()))
             }
         }
-        Some(LiveShape::Ellipse { pie, xf, .. }) if upright(xf) => {
+        Some(LiveShape::Ellipse { pie, mode, xf, .. }) if upright(xf) && *mode != shapes::EllipseMode::Arc => {
             let sweep = (pie.1 - pie.0).abs();
             (sweep < 1e-6 || (sweep - 360.0).abs() < 1e-6).then_some(Corners::Ellipse)
         }
         Some(
-            LiveShape::Rectangle { .. } | LiveShape::Ellipse { .. } | LiveShape::Polygon { .. } | LiveShape::Line { .. } | LiveShape::Path { .. },
+            LiveShape::Rectangle { .. }
+            | LiveShape::Ellipse { .. }
+            | LiveShape::Polygon { .. }
+            | LiveShape::Spiral { .. }
+            | LiveShape::Box3d { .. }
+            | LiveShape::Line { .. }
+            | LiveShape::Path { .. },
         ) => None,
         None => is_upright_rectangle(path).then_some(Corners::Square),
     }

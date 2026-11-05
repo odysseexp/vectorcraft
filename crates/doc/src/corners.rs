@@ -37,12 +37,12 @@ impl<'a> LiveCorners<'a> {
         let (base, xf, radii, kinds) = match live {
             None => (Cow::Borrowed(path), Affine::IDENTITY, vec![], vec![]),
             Some(l @ LiveShape::Rectangle { .. }) => {
-                let LiveShape::Rectangle { w, h, radii, kinds, xf } = l.folded() else { return None };
+                let LiveShape::Rectangle { w, h, radii, kinds, xf, .. } = l.folded() else { return None };
                 (Cow::Owned(shapes::rectangle(Rect::new(0.0, 0.0, w, h))), xf, radii.to_vec(), kinds.to_vec())
             }
             Some(l @ LiveShape::Polygon { radii, kinds, .. }) => (Cow::Owned(l.polygon_outline()), Affine::IDENTITY, radii.clone(), kinds.clone()),
             Some(LiveShape::Path { base, radii, kinds }) => (Cow::Borrowed(base), Affine::IDENTITY, radii.clone(), kinds.clone()),
-            Some(LiveShape::Ellipse { .. } | LiveShape::Line { .. }) => return None,
+            Some(LiveShape::Ellipse { .. } | LiveShape::Spiral { .. } | LiveShape::Box3d { .. } | LiveShape::Line { .. }) => return None,
         };
         let sources = if radii.iter().any(|r| *r > 0.0) {
             cut_corners(&base, &radii, &kinds).1
@@ -173,9 +173,12 @@ pub fn set_corners(path: &mut PathData, live: &mut Option<Box<LiveShape>>, corne
     l.fold_scale();
     match &mut **l {
         LiveShape::Rectangle { radii, kinds, .. } => edit(radii, kinds, corners, radius, kind),
-        LiveShape::Polygon { sides, radii, kinds, .. } => edit_vec(*sides as usize, radii, kinds, corners, radius, kind),
+        LiveShape::Polygon { sides, radii, kinds, params, .. } => {
+            let n = if params.spoke_ratio.is_some() { (*sides as usize) * 2 } else { *sides as usize };
+            edit_vec(n, radii, kinds, corners, radius, kind);
+        }
         LiveShape::Path { base, radii, kinds } => edit_vec(base.anchor_count(), radii, kinds, corners, radius, kind),
-        LiveShape::Ellipse { .. } | LiveShape::Line { .. } => return,
+        LiveShape::Ellipse { .. } | LiveShape::Spiral { .. } | LiveShape::Box3d { .. } | LiveShape::Line { .. } => return,
     }
     match live.as_deref_mut() {
         Some(LiveShape::Path { base, radii, kinds }) if radii.is_empty() && kinds.is_empty() => {
@@ -202,7 +205,14 @@ mod tests {
 
     #[test]
     fn rectangle_corners_map_to_their_anchors() {
-        let l = LiveShape::Rectangle { w: 100.0, h: 50.0, radii: [0.0, 10.0, 0.0, 0.0], kinds: Default::default(), xf: Affine::IDENTITY };
+        let l = LiveShape::Rectangle {
+            w: 100.0,
+            h: 50.0,
+            radii: [0.0, 10.0, 0.0, 0.0],
+            kinds: Default::default(),
+            xf: Affine::IDENTITY,
+            arc: Default::default(),
+        };
         let path = l.to_path();
         let c = LiveCorners::new(&path, Some(&l)).unwrap();
         // Anchors: top-left, the top-right corner's two, bottom-right, bottom-left.
@@ -218,7 +228,7 @@ mod tests {
         assert_eq!(c.style(&set(&[1])), (Some(10.0), Some(CornerKind::Round)));
         assert_eq!(c.style(&set(&[0, 1])), (None, Some(CornerKind::Round)));
         assert_eq!(c.style(&set(&[0, 2, 3])), (Some(0.0), Some(CornerKind::Round)));
-        let e = LiveShape::Ellipse { w: 1.0, h: 1.0, pie: (0.0, 360.0), xf: Affine::IDENTITY };
+        let e = LiveShape::Ellipse { w: 1.0, h: 1.0, pie: (0.0, 360.0), mode: Default::default(), xf: Affine::IDENTITY };
         assert!(LiveCorners::new(&e.to_path(), Some(&e)).is_none());
     }
 
@@ -245,7 +255,14 @@ mod tests {
     /// A polygon's corners are cut in the document and survive a change of sides when shared.
     #[test]
     fn polygon_corners_follow_their_sides() {
-        let mut l = LiveShape::Polygon { radius: 50.0, sides: 6, xf: Affine::translate((100.0, 100.0)), radii: vec![], kinds: vec![] };
+        let mut l = LiveShape::Polygon {
+            radius: 50.0,
+            sides: 6,
+            xf: Affine::translate((100.0, 100.0)),
+            radii: vec![],
+            kinds: vec![],
+            params: Default::default(),
+        };
         let (mut path, mut live) = (l.to_path(), Some(Box::new(l.clone())));
         set_corners(&mut path, &mut live, &set(&[0, 1, 2, 3, 4, 5]), Some(8.0), None);
         assert_eq!(path.anchor_count(), 12);

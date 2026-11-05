@@ -899,7 +899,14 @@ pub(crate) fn detect_shape(path: &PathData) -> Option<LiveShape> {
         }
         let rot = Affine::rotate(e0.y.atan2(e0.x));
         let flip = if e0.cross(e1) < 0.0 { Affine::scale_non_uniform(1.0, -1.0) } else { Affine::IDENTITY };
-        return Some(LiveShape::Rectangle { w, h, radii: [0.0; 4], kinds: Default::default(), xf: Affine::translate(a[0].p.to_vec2()) * rot * flip });
+        return Some(LiveShape::Rectangle {
+            w,
+            h,
+            radii: [0.0; 4],
+            kinds: Default::default(),
+            xf: Affine::translate(a[0].p.to_vec2()) * rot * flip,
+            arc: Default::default(),
+        });
     }
     let b = path.bounds()?;
     let c = b.center();
@@ -920,7 +927,7 @@ pub(crate) fn detect_shape(path: &PathData) -> Option<LiveShape> {
             }
         }
     }
-    Some(LiveShape::Ellipse { w: b.width(), h: b.height(), pie: (0.0, 360.0), xf: Affine::translate(b.origin().to_vec2()) })
+    Some(LiveShape::Ellipse { w: b.width(), h: b.height(), pie: (0.0, 360.0), mode: Default::default(), xf: Affine::translate(b.origin().to_vec2()) })
 }
 
 fn convert_to_shape(s: &mut Session, _: &Value) -> Result<Value> {

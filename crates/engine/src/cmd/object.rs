@@ -280,7 +280,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Live Shape Properties",
             [],
             None,
-            "{id?, ids?, radius?: pt, kind?: \"round\"|\"invertedRound\"|\"chamfer\", corners?: [i…], items?: [{id, corners?: [i…]}] (several objects, each with its own corners, in place of ids and corners: the canvas's corner widgets across a selection), sides?: n, polygonAngle?: degrees (counterclockwise from its first vertex straight up), polygonRadius?: pt (centre to vertex), sideLength?: pt (sets the radius), makeSidesEqual?: true (a polygon scaled unevenly: drops the uneven scale and shear, keeping its centre, angle and mean radius), pieStart?, pieEnd?: degrees (an ellipse's pie, counterclockwise from 3 o'clock; 0 to 360 is the whole ellipse), invertPie?: true (swaps them: the other part of the ellipse)} (Live Corners on any path: radius and kind set its corners (anchors that aren't smooth, where two sides, straight or curved (#1144), meet at an angle): `corners` (anchor indices of the path with its corners uncut, counting every subpath's anchors in order: a rectangle's 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left; a polygon's from the first vertex clockwise), else the corners with a Direct-Selected anchor, else every corner; each radius is drawn no larger than half the corner's shorter side allows; a path that isn't a live shape keeps its uncut outline so its corners stay editable, and is plain again once none is cut; sides: a polygon's, which keep the radius they shared; the polygon params apply in that order: sides, makeSidesEqual, polygonAngle, then sideLength or else polygonRadius)",
+            "{id?, ids?, radius?: pt, radii?: [pt], width?: pt, height?: pt, rx?: pt, ry?: pt, kind?: \"round\"|\"invertedRound\"|\"chamfer\", corners?: [i…], items?: [{id, corners?: [i…]}] (several objects, each with its own corners, in place of ids and corners: the canvas's corner widgets across a selection), sides?: n, points?: n, shapeMode?: \"polygon\"|\"star\", spokeRatio?: num, rounded?: num, randomized?: num, polygonAngle?: degrees (counterclockwise from its first vertex straight up), polygonRadius?: pt (centre to vertex), sideLength?: pt (sets the radius), makeSidesEqual?: true (a polygon scaled unevenly: drops the uneven scale and shear, keeping its centre, angle and mean radius), pieStart?, pieEnd?: degrees (an ellipse's pie, counterclockwise from 3 o'clock; 0 to 360 is the whole ellipse), ellipseMode?: \"slice\"|\"arc\"|\"chord\"|\"whole\", invertPie?: true (swaps them: the other part of the ellipse), turns?: num, divergence?: num, innerRadius?: num, angleX?: deg, angleY?: deg, angleZ?: deg, parallelX?: bool, parallelY?: bool, parallelZ?: bool, reset?: bool} (Live Corners on any path: radius and kind set its corners (anchors that aren't smooth, where two sides, straight or curved (#1144), meet at an angle): `corners` (anchor indices of the path with its corners uncut, counting every subpath's anchors in order: a rectangle's 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left; a polygon's from the first vertex clockwise), else the corners with a Direct-Selected anchor, else every corner; each radius is drawn no larger than half the corner's shorter side allows; a path that isn't a live shape keeps its uncut outline so its corners stay editable, and is plain again once none is cut; sides: a polygon's, which keep the radius they shared; the polygon params apply in that order: sides, makeSidesEqual, polygonAngle, then sideLength or else polygonRadius)",
             has_selection,
             set_live_shape
         ),
@@ -2104,7 +2104,14 @@ fn set_live_shape(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .transpose()?;
     let radius = p.get("radius").and_then(Value::as_f64);
-    let sides = p.get("sides").and_then(Value::as_u64);
+    let radii_arr: Option<[f64; 4]> = p.get("radii").and_then(Value::as_array).and_then(|arr| {
+        if arr.len() == 4 {
+            Some([arr[0].as_f64()?.max(0.0), arr[1].as_f64()?.max(0.0), arr[2].as_f64()?.max(0.0), arr[3].as_f64()?.max(0.0)])
+        } else {
+            None
+        }
+    });
+    let sides = p.get("sides").or_else(|| p.get("points")).and_then(Value::as_u64);
     // A number that must be `what` (None when absent).
     let number = |k: &str, ok: fn(f64) -> bool, what: &str| -> Result<Option<f64>> {
         match p.get(k) {
@@ -2118,6 +2125,48 @@ fn set_live_shape(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let angle = |k: &str| Ok::<_, EngineError>(number(k, |_| true, "an angle in degrees")?.map(|a| a.rem_euclid(360.0)));
     let length = |k: &str| number(k, |x| x > 0.0 && x <= crate::MAX_COORD, "a length in points above 0");
+    let rx_param = length("rx")?;
+    let ry_param = length("ry")?;
+    let width_param = length("width")?.or(rx_param.map(|r| r * 2.0));
+    let height_param = length("height")?.or(ry_param.map(|r| r * 2.0));
+    let ellipse_mode = super::create::parse_ellipse_mode(p, "object.setLiveShape")?;
+    let shape_mode = match str_param(p, "shapeMode") {
+        None => None,
+        Some("polygon") => Some(false),
+        Some("star") => Some(true),
+        Some(other) => return Err(bad("object.setLiveShape", format!("unknown shapeMode `{other}`"))),
+    };
+    let spoke_ratio = number("spokeRatio", |x| (0.01..=1.0).contains(&x), "a ratio in 0.01..=1.0")?;
+    let rounded = number("rounded", |x| (-10.0..=10.0).contains(&x), "a number in -10..=10")?;
+    let randomized = number("randomized", |x| (0.0..=10.0).contains(&x), "a number in 0..=10")?;
+    let turns = number("turns", |x| (0.01..=1024.0).contains(&x), "turns in 0.01..=1024")?;
+    let divergence = number("divergence", |x| (0.0..=1000.0).contains(&x), "divergence in 0..=1000")?;
+    let inner_radius = number("innerRadius", |x| (0.0..=0.99).contains(&x), "innerRadius in 0..=0.99")?;
+    let angle_x = angle("angleX")?;
+    let angle_y = angle("angleY")?;
+    let angle_z = angle("angleZ")?;
+    let parallel_x = p.get("parallelX").and_then(Value::as_bool);
+    let parallel_y = p.get("parallelY").and_then(Value::as_bool);
+    let parallel_z = p.get("parallelZ").and_then(Value::as_bool);
+    let reset = p.get("reset").and_then(Value::as_bool) == Some(true);
+    let has_extended = radii_arr.is_some()
+        || width_param.is_some()
+        || height_param.is_some()
+        || ellipse_mode.is_some()
+        || shape_mode.is_some()
+        || spoke_ratio.is_some()
+        || rounded.is_some()
+        || randomized.is_some()
+        || turns.is_some()
+        || divergence.is_some()
+        || inner_radius.is_some()
+        || angle_x.is_some()
+        || angle_y.is_some()
+        || angle_z.is_some()
+        || parallel_x.is_some()
+        || parallel_y.is_some()
+        || parallel_z.is_some()
+        || reset;
     // An ellipse's pie (Ellipse Properties: Pie Start and End Angle, degrees; Invert Pie swaps them).
     let (pie_start, pie_end) = (angle("pieStart")?, angle("pieEnd")?);
     let invert = p.get("invertPie").and_then(Value::as_bool) == Some(true);
@@ -2131,21 +2180,56 @@ fn set_live_shape(s: &mut Session, p: &Value) -> Result<Value> {
         let pie = (pie_start.unwrap_or(pie.0), pie_end.map_or(pie.1, end_of));
         if invert { (pie.1.rem_euclid(360.0), end_of(pie.0)) } else { pie }
     };
+    let apply_arc = |arc: &mut vectorcraft_doc::ShapeArc| {
+        if pie_start.is_some() || pie_end.is_some() || invert {
+            arc.pie = pie_of(arc.pie);
+        }
+        if let Some(m) = ellipse_mode {
+            arc.mode = m;
+            if m == vectorcraft_geom::shapes::EllipseMode::Whole && pie_start.is_none() && pie_end.is_none() {
+                arc.pie = (0.0, 360.0);
+            } else if m != vectorcraft_geom::shapes::EllipseMode::Whole
+                && ((arc.pie.1 - arc.pie.0).abs() < 1e-6 || ((arc.pie.1 - arc.pie.0).abs() - 360.0).abs() < 1e-6)
+                && pie_start.is_none()
+                && pie_end.is_none()
+            {
+                arc.pie = (30.0, 330.0);
+            }
+        }
+    };
     // When every value given is the current one, the document and its undo history stay as they
     // are.
     let st = s.doc()?;
     let has_values = |id: &NodeId| {
+        if has_extended {
+            return false;
+        }
         let Some(NodeKind::Path { path, live, .. }) = st.doc.node(*id).map(|n| &n.kind) else { return true };
         match live.as_deref() {
-            Some(l @ LiveShape::Polygon { sides: now, .. })
+            Some(l @ LiveShape::Polygon { sides: now, params, .. }) => {
                 if !(sides.is_none_or(|n| n.clamp(3, 1000) == u64::from(*now))
                     && (!equal || l.polygon_sides_equal())
                     && polygon_angle.is_none_or(|a| l.polygon_angle() == Some(a))
-                    && side.and_then(|len| l.polygon_radius_for_side(len)).or(polygon_radius).is_none_or(|r| l.polygon_radius() == Some(r))) =>
+                    && side.and_then(|len| l.polygon_radius_for_side(len)).or(polygon_radius).is_none_or(|r| l.polygon_radius() == Some(r))
+                    && pie_of(params.arc.pie) == params.arc.pie)
+                {
+                    return false;
+                }
+            }
+            Some(LiveShape::Rectangle { arc, .. }) if pie_of(arc.pie) != arc.pie => return false,
+            Some(LiveShape::Ellipse { pie, .. }) if pie_of(*pie) != *pie => return false,
+            None if (sides.is_some()
+                || polygon_angle.is_some()
+                || polygon_radius.is_some()
+                || side.is_some()
+                || equal
+                || pie_start.is_some()
+                || pie_end.is_some()
+                || invert)
+                && LiveShape::detect_star_from_path(path).is_some() =>
             {
                 return false;
             }
-            Some(LiveShape::Ellipse { pie, .. }) if pie_of(*pie) != *pie => return false,
             _ => {}
         }
         if radius.is_none() && kind.is_none() {
@@ -2163,11 +2247,74 @@ fn set_live_shape(s: &mut Session, p: &Value) -> Result<Value> {
     if ids.iter().all(has_values) {
         return ok();
     }
+    let wants_star_upgrade = sides.is_some()
+        || shape_mode.is_some()
+        || spoke_ratio.is_some()
+        || rounded.is_some()
+        || randomized.is_some()
+        || polygon_angle.is_some()
+        || polygon_radius.is_some()
+        || side.is_some()
+        || equal
+        || pie_start.is_some()
+        || pie_end.is_some()
+        || ellipse_mode.is_some()
+        || invert
+        || reset;
     s.edit("Live Shape", |d, sel| {
         for id in &ids {
             let Some(NodeKind::Path { path, live, .. }) = d.node_mut(*id).map(|n| &mut n.kind) else { continue };
+            if live.is_none()
+                && wants_star_upgrade
+                && let Some(detected) = LiveShape::detect_star_from_path(path)
+            {
+                *live = Some(Box::new(detected));
+            }
+            if let Some(l @ LiveShape::Rectangle { .. }) = live.as_deref_mut()
+                && (radii_arr.is_some()
+                    || width_param.is_some()
+                    || height_param.is_some()
+                    || pie_start.is_some()
+                    || pie_end.is_some()
+                    || ellipse_mode.is_some()
+                    || invert
+                    || reset)
+            {
+                *l = l.folded();
+                if let LiveShape::Rectangle { w, h, radii, kinds, arc, .. } = l {
+                    if let Some(nw) = width_param {
+                        *w = nw;
+                    }
+                    if let Some(nh) = height_param {
+                        *h = nh;
+                    }
+                    if let Some(nr) = radii_arr {
+                        *radii = nr;
+                    }
+                    apply_arc(arc);
+                    if reset {
+                        *radii = [0.0; 4];
+                        *kinds = Default::default();
+                        *arc = Default::default();
+                    }
+                }
+                *path = l.to_path();
+            }
             if let Some(l @ LiveShape::Polygon { .. }) = live.as_deref_mut()
-                && (sides.is_some() || polygon_angle.is_some() || polygon_radius.is_some() || side.is_some() || equal)
+                && (sides.is_some()
+                    || shape_mode.is_some()
+                    || spoke_ratio.is_some()
+                    || rounded.is_some()
+                    || randomized.is_some()
+                    || polygon_angle.is_some()
+                    || polygon_radius.is_some()
+                    || side.is_some()
+                    || equal
+                    || pie_start.is_some()
+                    || pie_end.is_some()
+                    || ellipse_mode.is_some()
+                    || invert
+                    || reset)
             {
                 if let Some(n) = sides {
                     l.set_sides(n);
@@ -2182,13 +2329,125 @@ fn set_live_shape(s: &mut Session, p: &Value) -> Result<Value> {
                 if let Some(r) = side.and_then(|len| l.polygon_radius_for_side(len)).or(polygon_radius) {
                     l.set_polygon_radius(r);
                 }
+                if let LiveShape::Polygon { radii, kinds, params, .. } = l {
+                    if let Some(is_star) = shape_mode {
+                        params.spoke_ratio = if is_star { Some(params.spoke_ratio.unwrap_or(0.5)) } else { None };
+                    }
+                    if let Some(sr) = spoke_ratio {
+                        params.spoke_ratio = Some(sr);
+                    }
+                    if let Some(rn) = rounded {
+                        params.rounded = rn;
+                    }
+                    if let Some(rd) = randomized {
+                        params.randomized = rd;
+                    }
+                    apply_arc(&mut params.arc);
+                    if reset {
+                        params.rounded = 0.0;
+                        params.randomized = 0.0;
+                        params.arc = Default::default();
+                        radii.clear();
+                        kinds.clear();
+                    }
+                }
                 *path = l.to_path();
             }
             if let Some(l @ LiveShape::Ellipse { .. }) = live.as_deref_mut()
-                && (pie_start.is_some() || pie_end.is_some() || invert)
+                && (width_param.is_some()
+                    || height_param.is_some()
+                    || pie_start.is_some()
+                    || pie_end.is_some()
+                    || ellipse_mode.is_some()
+                    || invert
+                    || reset)
             {
-                if let LiveShape::Ellipse { pie, .. } = l {
-                    *pie = pie_of(*pie);
+                *l = l.folded();
+                if let LiveShape::Ellipse { w, h, pie, mode, .. } = l {
+                    if let Some(nw) = width_param {
+                        *w = nw;
+                    }
+                    if let Some(nh) = height_param {
+                        *h = nh;
+                    }
+                    let mut arc = vectorcraft_doc::ShapeArc { pie: *pie, mode: *mode };
+                    apply_arc(&mut arc);
+                    if reset {
+                        arc = Default::default();
+                    }
+                    *pie = arc.pie;
+                    *mode = arc.mode;
+                }
+                *path = l.to_path();
+            }
+            if let Some(l @ LiveShape::Spiral { .. }) = live.as_deref_mut()
+                && (turns.is_some() || divergence.is_some() || inner_radius.is_some() || polygon_radius.is_some() || reset)
+            {
+                if let LiveShape::Spiral { radius: sr, turns: st, divergence: sd, inner_radius: si, .. } = l {
+                    if let Some(nr) = polygon_radius {
+                        *sr = nr;
+                    }
+                    if let Some(nt) = turns {
+                        *st = nt;
+                    }
+                    if let Some(nd) = divergence {
+                        *sd = nd;
+                    }
+                    if let Some(ni) = inner_radius {
+                        *si = ni;
+                    }
+                    if reset {
+                        *st = 3.0;
+                        *sd = 1.0;
+                        *si = 0.0;
+                    }
+                }
+                *path = l.to_path();
+            }
+            if let Some(l @ LiveShape::Box3d { .. }) = live.as_deref_mut()
+                && (width_param.is_some()
+                    || height_param.is_some()
+                    || angle_x.is_some()
+                    || angle_y.is_some()
+                    || angle_z.is_some()
+                    || parallel_x.is_some()
+                    || parallel_y.is_some()
+                    || parallel_z.is_some()
+                    || reset)
+            {
+                if let LiveShape::Box3d { w, h, angle_x: ax, angle_y: ay, angle_z: az, parallel_x: px, parallel_y: py, parallel_z: pz, .. } = l {
+                    if let Some(nw) = width_param {
+                        *w = nw;
+                    }
+                    if let Some(nh) = height_param {
+                        *h = nh;
+                    }
+                    if let Some(nx) = angle_x {
+                        *ax = nx;
+                    }
+                    if let Some(ny) = angle_y {
+                        *ay = ny;
+                    }
+                    if let Some(nz) = angle_z {
+                        *az = nz;
+                    }
+                    if let Some(npx) = parallel_x {
+                        *px = npx;
+                    }
+                    if let Some(npy) = parallel_y {
+                        *py = npy;
+                    }
+                    if let Some(npz) = parallel_z {
+                        *pz = npz;
+                    }
+                    if reset {
+                        *ax = 30.0;
+                        *ay = 35.0;
+                        *az = 0.0;
+                        *px = true;
+                        *py = true;
+                        *pz = true;
+                    }
                 }
                 *path = l.to_path();
             }

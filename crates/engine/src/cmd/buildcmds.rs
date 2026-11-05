@@ -882,12 +882,17 @@ fn traced_shape(shape: tr::TracedShape, xf: vectorcraft_geom::Affine) -> LiveSha
             radii: [radius; 4],
             kinds: Default::default(),
             xf: about(center, rotation) * Affine::translate((-width / 2.0, -height / 2.0)),
+            arc: Default::default(),
         },
-        tr::TracedShape::Ellipse { center, rx, ry, rotation } => {
-            LiveShape::Ellipse { w: 2.0 * rx, h: 2.0 * ry, pie: (0.0, 360.0), xf: about(center, rotation) * Affine::translate((-rx, -ry)) }
-        }
+        tr::TracedShape::Ellipse { center, rx, ry, rotation } => LiveShape::Ellipse {
+            w: 2.0 * rx,
+            h: 2.0 * ry,
+            pie: (0.0, 360.0),
+            mode: Default::default(),
+            xf: about(center, rotation) * Affine::translate((-rx, -ry)),
+        },
         tr::TracedShape::Polygon { center, radius, sides, rotation } => {
-            LiveShape::Polygon { radius, sides, xf: about(center, rotation), radii: vec![], kinds: vec![] }
+            LiveShape::Polygon { radius, sides, xf: about(center, rotation), radii: vec![], kinds: vec![], params: Default::default() }
         }
     };
     // (Whether the move changed the shape's own numbers does not matter: its path is made from them next.)

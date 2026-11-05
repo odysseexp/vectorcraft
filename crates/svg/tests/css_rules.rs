@@ -30,7 +30,14 @@ fn rect(d: &mut Document, (x, y, w, h): (f64, f64, f64, f64), radius: f64) -> No
         Appearance::basic(fill, Paint::solid(Color::rgb8(0, 0, 255)), 2.0),
     );
     if let NodeKind::Path { live, .. } = &mut n.kind {
-        *live = Some(Box::new(LiveShape::Rectangle { w, h, radii: [radius; 4], kinds: Default::default(), xf: Affine::translate((x, y)) }));
+        *live = Some(Box::new(LiveShape::Rectangle {
+            w,
+            h,
+            radii: [radius; 4],
+            kinds: Default::default(),
+            xf: Affine::translate((x, y)),
+            arc: Default::default(),
+        }));
     }
     n
 }
@@ -120,7 +127,7 @@ fn ellipses_round_fully_and_options_change_units_and_names() {
     let mut e =
         Node::path(d.alloc_id(), shapes::ellipse(Rect::new(0.0, 0.0, 72.0, 36.0)), Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.0));
     if let NodeKind::Path { live, .. } = &mut e.kind {
-        *live = Some(Box::new(LiveShape::Ellipse { w: 72.0, h: 36.0, pie: (0.0, 360.0), xf: Affine::IDENTITY }));
+        *live = Some(Box::new(LiveShape::Ellipse { w: 72.0, h: 36.0, pie: (0.0, 360.0), mode: Default::default(), xf: Affine::IDENTITY }));
     }
     let e = add(&mut d, e);
     let a = rect(&mut d, (0.0, 0.0, 10.0, 10.0), 0.0);

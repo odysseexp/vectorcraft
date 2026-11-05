@@ -908,6 +908,7 @@ mod tests {
             radii: [0.0; 4],
             kinds: Default::default(),
             xf: vectorcraft_geom::Affine::translate((100.0, 100.0)),
+            arc: Default::default(),
         };
         let mut d = vectorcraft_doc::Document::new(500.0, 500.0);
         let id = d.alloc_id();

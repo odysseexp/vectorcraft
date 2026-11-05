@@ -14,13 +14,46 @@ pub fn specs() -> Vec<CommandSpec> {
             "Rectangle",
             [],
             None,
-            "{x, y, width, height, radius?: pt, rotation?: deg (about centre)} → {id}",
+            "{x, y, width, height, radius?: pt, radii?: [pt], pieStart?: deg, pieEnd?: deg, ellipseMode?: slice|arc|chord|whole, rotation?: deg (about centre)} → {id}",
             has_doc,
             rectangle
         ),
-        cmd!("shape.ellipse", "Ellipse", [], None, "{x, y, width, height, rotation?: deg (about centre)} → {id}", has_doc, ellipse),
-        cmd!("shape.polygon", "Polygon", [], None, "{cx, cy, radius, sides=6, rotation?: deg} → {id}", has_doc, polygon),
-        cmd!("shape.star", "Star", [], None, "{cx, cy, radius1, radius2, points=5, rotation?: deg} → {id}", has_doc, star),
+        cmd!(
+            "shape.ellipse",
+            "Ellipse",
+            [],
+            None,
+            "{x, y, width, height, rx?: pt, ry?: pt, pieStart?: deg, pieEnd?: deg, ellipseMode?: slice|arc|chord|whole, rotation?: deg (about centre)} → {id}",
+            has_doc,
+            ellipse
+        ),
+        cmd!(
+            "shape.polygon",
+            "Polygon",
+            [],
+            None,
+            "{cx, cy, radius, sides=6, spokeRatio?: num, rounded?: num, randomized?: num, pieStart?: deg, pieEnd?: deg, ellipseMode?: slice|arc|chord|whole, rotation?: deg} → {id}",
+            has_doc,
+            polygon
+        ),
+        cmd!(
+            "shape.star",
+            "Star",
+            [],
+            None,
+            "{cx, cy, radius1, radius2, points=5, spokeRatio?: num, rounded?: num, randomized?: num, pieStart?: deg, pieEnd?: deg, ellipseMode?: slice|arc|chord|whole, live?: bool, rotation?: deg} → {id}",
+            has_doc,
+            star
+        ),
+        cmd!(
+            "shape.box3d",
+            "3D Box",
+            [],
+            None,
+            "{x, y, width, height, angleX=30, angleY=35, angleZ=0, parallelX=true, parallelY=true, parallelZ=true, rotation?: deg (about centre)} → {id}",
+            has_doc,
+            box3d
+        ),
         cmd!(
             "shape.flare",
             "Flare",
@@ -31,7 +64,15 @@ pub fn specs() -> Vec<CommandSpec> {
             flare
         ),
         cmd!("shape.line", "Line Segment", [], None, "{x1, y1, x2, y2} → {id}", has_doc, line),
-        cmd!("shape.spiral", "Spiral", [], None, "{cx, cy, radius, decay=80 (%), segments=10, clockwise?} → {id}", has_doc, spiral),
+        cmd!(
+            "shape.spiral",
+            "Spiral",
+            [],
+            None,
+            "{cx, cy, radius, decay=80 (%), segments=10, turns?: num, divergence?: num, innerRadius?: num, clockwise?} → {id}",
+            has_doc,
+            spiral
+        ),
         cmd!("shape.arc", "Arc", [], None, "{x1, y1, x2, y2, closed?} → {id}", has_doc, arc),
         cmd!(
             "shape.rectangularGrid",
@@ -187,11 +228,8 @@ fn path_kind(path: PathData, live: Option<LiveShape>) -> NodeKind {
 fn rect_of(p: &Value, cmd: &str) -> Result<Rect> {
     let x = f64_req(p, "x", cmd)?;
     let y = f64_req(p, "y", cmd)?;
-    let w = f64_req(p, "width", cmd)?;
-    let h = f64_req(p, "height", cmd)?;
-    if !(w.is_finite() && h.is_finite()) {
-        return Err(bad(cmd, "invalid size"));
-    }
+    let w = if p.get("width").is_none() && p.get("rx").is_some() { f64_req(p, "rx", cmd)? * 2.0 } else { f64_req(p, "width", cmd)? };
+    let h = if p.get("height").is_none() && p.get("ry").is_some() { f64_req(p, "ry", cmd)? * 2.0 } else { f64_req(p, "height", cmd)? };
     Ok(Rect::new(x, y, x + w, y + h).abs())
 }
 
@@ -206,23 +244,55 @@ fn rect_transform(r: Rect, p: &Value, cmd: &str) -> Result<Affine> {
     Ok(Affine::translate(r.center().to_vec2()) * Affine::rotate(rotation.to_radians()) * Affine::translate((-r.width() / 2.0, -r.height() / 2.0)))
 }
 
+pub(crate) fn parse_ellipse_mode(p: &Value, cmd: &str) -> Result<Option<shapes::EllipseMode>> {
+    match str_param(p, "ellipseMode") {
+        None => Ok(None),
+        Some("slice" | "pie") => Ok(Some(shapes::EllipseMode::Slice)),
+        Some("arc" | "open") => Ok(Some(shapes::EllipseMode::Arc)),
+        Some("chord") => Ok(Some(shapes::EllipseMode::Chord)),
+        Some("whole") => Ok(Some(shapes::EllipseMode::Whole)),
+        Some(other) => Err(bad(cmd, format!("unknown ellipseMode `{other}`"))),
+    }
+}
+
+fn parse_shape_arc(p: &Value, cmd: &str) -> Result<vectorcraft_doc::ShapeArc> {
+    let mut arc = vectorcraft_doc::ShapeArc::default();
+    if let Some(s) = p.get("pieStart").and_then(Value::as_f64).filter(|v| v.is_finite()) {
+        arc.pie.0 = s.rem_euclid(360.0);
+    }
+    if let Some(e) = p.get("pieEnd").and_then(Value::as_f64).filter(|v| v.is_finite()) {
+        let e = e.rem_euclid(360.0);
+        arc.pie.1 = if e == 0.0 { 360.0 } else { e };
+    }
+    if let Some(mode) = parse_ellipse_mode(p, cmd)? {
+        arc.mode = mode;
+    }
+    Ok(arc)
+}
+
 fn rectangle(s: &mut Session, p: &Value) -> Result<Value> {
     let r = rect_of(p, "shape.rectangle")?;
     let radius = f64_or(p, "radius", 0.0).max(0.0);
-    let live = LiveShape::Rectangle {
-        w: r.width(),
-        h: r.height(),
-        radii: [radius; 4],
-        kinds: Default::default(),
-        xf: rect_transform(r, p, "shape.rectangle")?,
+    let radii = match p.get("radii").and_then(Value::as_array) {
+        Some(arr) if arr.len() == 4 => [
+            arr[0].as_f64().unwrap_or(radius).max(0.0),
+            arr[1].as_f64().unwrap_or(radius).max(0.0),
+            arr[2].as_f64().unwrap_or(radius).max(0.0),
+            arr[3].as_f64().unwrap_or(radius).max(0.0),
+        ],
+        _ => [radius; 4],
     };
-    let label = if radius > 0.0 { "Rounded Rectangle" } else { "Rectangle" };
+    let arc = parse_shape_arc(p, "shape.rectangle")?;
+    let live =
+        LiveShape::Rectangle { w: r.width(), h: r.height(), radii, kinds: Default::default(), xf: rect_transform(r, p, "shape.rectangle")?, arc };
+    let label = if radii.iter().any(|v| *v > 0.0) { "Rounded Rectangle" } else { "Rectangle" };
     add_art(s, label, path_kind(live.to_path(), Some(live)), None)
 }
 
 fn ellipse(s: &mut Session, p: &Value) -> Result<Value> {
     let r = rect_of(p, "shape.ellipse")?;
-    let live = LiveShape::Ellipse { w: r.width(), h: r.height(), pie: (0.0, 360.0), xf: rect_transform(r, p, "shape.ellipse")? };
+    let arc = parse_shape_arc(p, "shape.ellipse")?;
+    let live = LiveShape::Ellipse { w: r.width(), h: r.height(), pie: arc.pie, mode: arc.mode, xf: rect_transform(r, p, "shape.ellipse")? };
     add_art(s, "Ellipse", path_kind(live.to_path(), Some(live)), None)
 }
 
@@ -232,7 +302,12 @@ fn polygon(s: &mut Session, p: &Value) -> Result<Value> {
     let sides = p.get("sides").and_then(Value::as_u64).unwrap_or(6).clamp(3, 1000) as u32;
     let rot = f64_or(p, "rotation", 0.0);
     let xf = Affine::translate(c.to_vec2()) * Affine::rotate(rot.to_radians());
-    let live = LiveShape::Polygon { radius: r, sides, xf, radii: vec![], kinds: vec![] };
+    let spoke_ratio = p.get("spokeRatio").and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v.clamp(0.01, 1.0));
+    let rounded = f64_or(p, "rounded", 0.0).clamp(-10.0, 10.0);
+    let randomized = f64_or(p, "randomized", 0.0).clamp(0.0, 10.0);
+    let arc = parse_shape_arc(p, "shape.polygon")?;
+    let params = vectorcraft_doc::PolygonParams { spoke_ratio, rounded, randomized, arc };
+    let live = LiveShape::Polygon { radius: r, sides, xf, radii: vec![], kinds: vec![], params };
     add_art(s, "Polygon", path_kind(live.to_path(), Some(live)), None)
 }
 
@@ -241,8 +316,52 @@ fn star(s: &mut Session, p: &Value) -> Result<Value> {
     let r1 = f64_req(p, "radius1", "shape.star")?.abs();
     let r2 = f64_or(p, "radius2", r1 / 2.0).abs();
     let n = p.get("points").and_then(Value::as_u64).unwrap_or(5).clamp(2, 1000) as u32;
-    let path = shapes::star(c, r1, r2, n, f64_or(p, "rotation", 0.0));
-    add_art(s, "Star", path_kind(path, None), None)
+    let rot = f64_or(p, "rotation", 0.0);
+    let rounded = f64_or(p, "rounded", 0.0).clamp(-10.0, 10.0);
+    let randomized = f64_or(p, "randomized", 0.0).clamp(0.0, 10.0);
+    let arc = parse_shape_arc(p, "shape.star")?;
+    let has_extra = bool_or(p, "live", false)
+        || p.get("spokeRatio").is_some()
+        || rounded.abs() > 1e-9
+        || randomized.abs() > 1e-9
+        || arc != vectorcraft_doc::ShapeArc::default();
+    if has_extra {
+        let ratio = p
+            .get("spokeRatio")
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite())
+            .unwrap_or_else(|| if r1 > 1e-6 { r2 / r1 } else { 0.5 })
+            .clamp(0.01, 1.0);
+        let xf = Affine::translate(c.to_vec2()) * Affine::rotate(rot.to_radians());
+        let params = vectorcraft_doc::PolygonParams { spoke_ratio: Some(ratio), rounded, randomized, arc };
+        let live = LiveShape::Polygon { radius: r1, sides: n.max(3), xf, radii: vec![], kinds: vec![], params };
+        add_art(s, "Star", path_kind(live.to_path(), Some(live)), None)
+    } else {
+        let path = shapes::star(c, r1, r2, n, rot);
+        add_art(s, "Star", path_kind(path, None), None)
+    }
+}
+
+fn box3d(s: &mut Session, p: &Value) -> Result<Value> {
+    let r = rect_of(p, "shape.box3d")?;
+    let angle_x = f64_or(p, "angleX", 30.0).rem_euclid(360.0);
+    let angle_y = f64_or(p, "angleY", 35.0).rem_euclid(360.0);
+    let angle_z = f64_or(p, "angleZ", 0.0).rem_euclid(360.0);
+    let parallel_x = bool_or(p, "parallelX", true);
+    let parallel_y = bool_or(p, "parallelY", true);
+    let parallel_z = bool_or(p, "parallelZ", true);
+    let live = LiveShape::Box3d {
+        w: r.width(),
+        h: r.height(),
+        angle_x,
+        angle_y,
+        angle_z,
+        parallel_x,
+        parallel_y,
+        parallel_z,
+        xf: rect_transform(r, p, "shape.box3d")?,
+    };
+    add_art(s, "3D Box", path_kind(live.to_path(), Some(live)), None)
 }
 
 /// Flare tool: a lens flare built from radial-gradient paths in Screen mode — a bright centre, a halo
@@ -359,14 +478,26 @@ fn line(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn spiral(s: &mut Session, p: &Value) -> Result<Value> {
     let c = Point::new(f64_req(p, "cx", "shape.spiral")?, f64_req(p, "cy", "shape.spiral")?);
-    let path = shapes::spiral(
-        c,
-        f64_req(p, "radius", "shape.spiral")?,
-        f64_or(p, "decay", 80.0),
-        p.get("segments").and_then(Value::as_u64).unwrap_or(10).clamp(2, 1000) as u32,
-        bool_or(p, "clockwise", true),
-    );
-    add_art(s, "Spiral", path_kind(path, None), None)
+    let r = f64_req(p, "radius", "shape.spiral")?;
+    let clockwise = bool_or(p, "clockwise", true);
+    let segments = p.get("segments").and_then(Value::as_u64).unwrap_or(10).clamp(2, 1000) as u32;
+    let decay = f64_or(p, "decay", 80.0);
+    let has_configured = p.get("turns").is_some() || p.get("divergence").is_some() || p.get("innerRadius").is_some();
+    let turns = f64_or(p, "turns", (f64::from(segments) / 4.0).clamp(0.25, 250.0)).clamp(0.01, 1024.0);
+    let divergence = f64_or(p, "divergence", 1.0).clamp(0.0, 1000.0);
+    let inner_radius = f64_or(p, "innerRadius", 0.0).clamp(0.0, 0.99);
+    let live = LiveShape::Spiral {
+        radius: r.abs(),
+        turns,
+        divergence,
+        inner_radius,
+        decay: (!has_configured).then_some(decay),
+        segments: (!has_configured).then_some(segments),
+        clockwise,
+        xf: Affine::translate(c.to_vec2()),
+    };
+    let path = if has_configured { live.to_path() } else { shapes::spiral(c, r, decay, segments, clockwise) };
+    add_art(s, "Spiral", path_kind(path, Some(live)), None)
 }
 
 fn arc(s: &mut Session, p: &Value) -> Result<Value> {

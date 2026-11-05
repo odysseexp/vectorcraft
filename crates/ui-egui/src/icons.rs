@@ -44,6 +44,7 @@ pub fn tool_icon(name: &str) -> &'static str {
         "tool-ellipse" => "dc-ellipse",
         "tool-polygon" => "dc-polygon",
         "tool-star" => "star",
+        "tool-box3d" => "dc-cube",
         "tool-flare" => "dc-flare",
         "tool-brush" => "paintbrush",
         "tool-blob-brush" => "brush",

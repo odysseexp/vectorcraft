@@ -61,7 +61,7 @@ impl Ellipse {
     /// inverted.
     fn of(doc: &Document, id: NodeId) -> Option<(Self, (f64, f64))> {
         let NodeKind::Path { live, .. } = &doc.node(id)?.kind else { return None };
-        let Some(LiveShape::Ellipse { w, h, pie, xf }) = live.as_deref() else { return None };
+        let Some(LiveShape::Ellipse { w, h, pie, xf, .. }) = live.as_deref() else { return None };
         let finite = w.is_finite() && h.is_finite() && xf.as_coeffs().iter().all(|c| c.is_finite());
         let usable = finite && w.abs() > 1e-9 && h.abs() > 1e-9 && xf.determinant().abs() > 1e-12;
         usable.then_some((Self { w: *w, h: *h, xf: *xf }, *pie))
@@ -212,7 +212,7 @@ mod tests {
     /// A document holding a live `w` × `h` ellipse placed by `xf` with pie angles `pie`, and a
     /// selection of it.
     fn ellipse_doc(w: f64, h: f64, pie: (f64, f64), xf: Affine) -> (Document, NodeId, Selection) {
-        let live = LiveShape::Ellipse { w, h, pie, xf };
+        let live = LiveShape::Ellipse { w, h, pie, mode: Default::default(), xf };
         let mut d = Document::new(500.0, 500.0);
         let l = d.layers[0].id;
         let id = d.alloc_id();

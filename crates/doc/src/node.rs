@@ -72,6 +72,66 @@ impl LayerColor {
     }
 }
 
+/// Optional arc/slice/chord/open cut parameters on a live shape (`0..360` degrees and [`shapes::EllipseMode`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeArc {
+    #[serde(default = "whole_pie", skip_serializing_if = "is_whole_pie")]
+    pub pie: (f64, f64),
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub mode: shapes::EllipseMode,
+}
+
+impl Default for ShapeArc {
+    fn default() -> Self {
+        Self { pie: (0.0, 360.0), mode: shapes::EllipseMode::Slice }
+    }
+}
+
+fn whole_pie() -> (f64, f64) {
+    (0.0, 360.0)
+}
+
+fn is_whole_pie(pie: &(f64, f64)) -> bool {
+    *pie == (0.0, 360.0)
+}
+
+/// Extra customizable parameters for a live polygon or star.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PolygonParams {
+    /// When `Some(ratio)`, the shape is a star with inner radius `radius * ratio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoke_ratio: Option<f64>,
+    /// Smooth Bezier tangent rounding at vertices (`-10.0..=10.0`, `0.0` = sharp).
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub rounded: f64,
+    /// Deterministic pseudo-random vertex jitter (`0.0..=10.0`, `0.0` = regular).
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub randomized: f64,
+    /// Optional pie/arc/chord opening of the polygon or star.
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub arc: ShapeArc,
+}
+
+fn default_spiral_turns() -> f64 {
+    3.0
+}
+
+fn default_spiral_divergence() -> f64 {
+    1.0
+}
+
+fn default_box_angle_x() -> f64 {
+    30.0
+}
+
+fn default_box_angle_y() -> f64 {
+    35.0
+}
+
+fn default_box_angle_z() -> f64 {
+    0.0
+}
+
 /// Live shape parameters (Illustrator's "Live Shapes"). The node's path is regenerated from these
 /// while the shape stays live; editing anchors directly converts it to a plain path.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -92,12 +152,18 @@ pub enum LiveShape {
         /// or reflection plus a move, unless a shear (or a file saved before transforms folded
         /// their scale into `w`/`h`) put more in it.
         xf: Affine,
+        /// Optional arc/slice/chord/open cut of the rectangle.
+        #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+        arc: ShapeArc,
     },
     Ellipse {
         w: f64,
         h: f64,
         /// Pie start/end angles in degrees (0/360 = full ellipse).
         pie: (f64, f64),
+        /// How the ellipse's angular span is closed or opened (slice, arc, chord, whole).
+        #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+        mode: shapes::EllipseMode,
         xf: Affine,
     },
     Polygon {
@@ -112,6 +178,42 @@ pub enum LiveShape {
         /// Corner kinds, in the same order (none: round).
         #[serde(default, skip_serializing_if = "all_round")]
         kinds: Vec<CornerKind>,
+        /// Optional star spoke ratio, bezier rounding, randomization and arc opening.
+        #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+        params: PolygonParams,
+    },
+    Spiral {
+        radius: f64,
+        #[serde(default = "default_spiral_turns")]
+        turns: f64,
+        #[serde(default = "default_spiral_divergence")]
+        divergence: f64,
+        #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+        inner_radius: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decay: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        segments: Option<u32>,
+        #[serde(default = "yes")]
+        clockwise: bool,
+        xf: Affine,
+    },
+    Box3d {
+        w: f64,
+        h: f64,
+        #[serde(default = "default_box_angle_x")]
+        angle_x: f64,
+        #[serde(default = "default_box_angle_y")]
+        angle_y: f64,
+        #[serde(default = "default_box_angle_z")]
+        angle_z: f64,
+        #[serde(default = "yes")]
+        parallel_x: bool,
+        #[serde(default = "yes")]
+        parallel_y: bool,
+        #[serde(default = "yes")]
+        parallel_z: bool,
+        xf: Affine,
     },
     Line {
         a: Point,
@@ -138,7 +240,10 @@ impl LiveShape {
             LiveShape::Rectangle { radii, .. } if radii.iter().any(|r| *r > 0.0) => "Rounded Rectangle",
             LiveShape::Rectangle { .. } => "Rectangle",
             LiveShape::Ellipse { .. } => "Ellipse",
+            LiveShape::Polygon { params, .. } if params.spoke_ratio.is_some() => "Star",
             LiveShape::Polygon { .. } => "Polygon",
+            LiveShape::Spiral { .. } => "Spiral",
+            LiveShape::Box3d { .. } => "3D Box",
             LiveShape::Line { .. } => "Line",
             LiveShape::Path { .. } => "Path",
         }
@@ -146,11 +251,26 @@ impl LiveShape {
     /// Regenerate the path.
     pub fn to_path(&self) -> PathData {
         match self {
-            LiveShape::Rectangle { w, h, radii, kinds, xf } => {
-                shapes::rectangle_with_corners(Rect::new(0.0, 0.0, *w, *h), *radii, *kinds).transformed(*xf)
+            LiveShape::Rectangle { w, h, radii, kinds, xf, arc } => {
+                let base = shapes::rectangle_with_corners(Rect::new(0.0, 0.0, *w, *h), *radii, *kinds);
+                shapes::apply_shape_arc(base, Point::new(*w / 2.0, *h / 2.0), arc.pie.0, arc.pie.1, arc.mode).transformed(*xf)
             }
-            LiveShape::Ellipse { w, h, pie, xf } => shapes::ellipse_pie(Rect::new(0.0, 0.0, *w, *h), pie.0, pie.1).transformed(*xf),
-            LiveShape::Polygon { radii, kinds, .. } => cut_corners(&self.polygon_outline(), radii, kinds).0,
+            LiveShape::Ellipse { w, h, pie, mode, xf } => shapes::ellipse_arc(Rect::new(0.0, 0.0, *w, *h), pie.0, pie.1, *mode).transformed(*xf),
+            LiveShape::Polygon { radii, kinds, xf, params, .. } => {
+                let base = cut_corners(&self.polygon_outline(), radii, kinds).0;
+                shapes::apply_shape_arc(base, *xf * Point::ZERO, params.arc.pie.0, params.arc.pie.1, params.arc.mode)
+            }
+            LiveShape::Spiral { radius, turns, divergence, inner_radius, decay, segments, clockwise, xf } => {
+                let p = if decay.is_some() || segments.is_some() {
+                    shapes::spiral(Point::ZERO, *radius, decay.unwrap_or(80.0), segments.unwrap_or(10), *clockwise)
+                } else {
+                    shapes::spiral_configured(Point::ZERO, *radius, *turns, *divergence, *inner_radius, *clockwise)
+                };
+                p.transformed(*xf)
+            }
+            LiveShape::Box3d { w, h, angle_x, angle_y, angle_z, parallel_x, parallel_y, parallel_z, xf } => {
+                shapes::box3d(Rect::new(0.0, 0.0, *w, *h), *angle_x, *angle_y, *angle_z, *parallel_x, *parallel_y, *parallel_z).transformed(*xf)
+            }
             LiveShape::Line { a, b } => shapes::line(*a, *b),
             LiveShape::Path { base, radii, kinds } => cut_corners(base, radii, kinds).0,
         }
@@ -158,15 +278,30 @@ impl LiveShape {
     /// A polygon's outline with its corners uncut, in the document (empty for other shapes).
     pub fn polygon_outline(&self) -> PathData {
         match self {
-            LiveShape::Polygon { radius, sides, xf, .. } => shapes::polygon(Point::ZERO, *radius, *sides, 0.0).transformed(*xf),
+            LiveShape::Polygon { radius, sides, xf, params, .. } => {
+                let p = match params.spoke_ratio {
+                    Some(ratio) => shapes::star_configured(
+                        Point::ZERO,
+                        *radius,
+                        *radius * ratio.clamp(0.01, 1.0),
+                        *sides,
+                        0.0,
+                        params.rounded,
+                        params.randomized,
+                    ),
+                    None => shapes::polygon_configured(Point::ZERO, *radius, *sides, 0.0, params.rounded, params.randomized),
+                };
+                p.transformed(*xf)
+            }
             _ => PathData::default(),
         }
     }
     /// Give a polygon `n` sides (3–1000). Its corners keep the radius and kind they shared; else
     /// the corners past the old last one are sharp.
     pub fn set_sides(&mut self, n: u64) {
-        let LiveShape::Polygon { sides, radii, kinds, .. } = self else { return };
+        let LiveShape::Polygon { sides, radii, kinds, params, .. } = self else { return };
         *sides = n.clamp(3, 1000) as u32;
+        let corner_count = if params.spoke_ratio.is_some() { (*sides as usize) * 2 } else { *sides as usize };
         fn spread<T: Copy + PartialEq + Default>(v: &mut Vec<T>, n: usize) {
             match v.first().copied() {
                 Some(x) if v.iter().all(|y| *y == x) => *v = vec![x; n],
@@ -174,8 +309,43 @@ impl LiveShape {
                 None => {}
             }
         }
-        spread(radii, *sides as usize);
-        spread(kinds, *sides as usize);
+        spread(radii, corner_count);
+        spread(kinds, corner_count);
+    }
+    /// Recognize a regular star path (`shapes::star`) so it can be edited as a live star shape.
+    pub fn detect_star_from_path(path: &PathData) -> Option<Self> {
+        let [sp] = path.subpaths.as_slice() else { return None };
+        let n = sp.anchors.len();
+        if !sp.closed || n < 6 || !n.is_multiple_of(2) {
+            return None;
+        }
+        if !(0..sp.segment_count()).all(|i| sp.segment_is_line(i)) {
+            return None;
+        }
+        let sum = sp.anchors.iter().fold(Point::ZERO, |acc, a| Point::new(acc.x + a.p.x, acc.y + a.p.y));
+        let c = Point::new(sum.x / n as f64, sum.y / n as f64);
+        let r0 = sp.anchors.first()?.p.distance(c);
+        let r1 = sp.anchors.get(1)?.p.distance(c);
+        if !(r0.is_finite() && r1.is_finite() && r0 > 1e-3 && r1 > 1e-3 && (r0 - r1).abs() > 1e-3 * r0.max(r1)) {
+            return None;
+        }
+        for (i, a) in sp.anchors.iter().enumerate() {
+            let want = if i.is_multiple_of(2) { r0 } else { r1 };
+            if (a.p.distance(c) - want).abs() > 1e-2 * want {
+                return None;
+            }
+        }
+        let p0 = sp.anchors.first()?.p;
+        let rot = (p0.x - c.x).atan2(-(p0.y - c.y));
+        let (outer, inner) = if r0 >= r1 { (r0, r1) } else { (r1, r0) };
+        Some(Self::Polygon {
+            radius: outer,
+            sides: (n / 2) as u32,
+            xf: Affine::translate(c.to_vec2()) * Affine::rotate(rot),
+            radii: vec![],
+            kinds: vec![],
+            params: PolygonParams { spoke_ratio: Some((inner / outer).clamp(0.01, 1.0)), ..PolygonParams::default() },
+        })
     }
     /// A polygon's radius in the document, centre to vertex: its own radius by the mean scale of
     /// `xf` (exact while its sides are equal). None for other shapes.
@@ -249,7 +419,7 @@ impl LiveShape {
                 *xf = a * *xf;
                 !moves_only(a) && self.fold_scale()
             }
-            LiveShape::Ellipse { xf, .. } => {
+            LiveShape::Ellipse { xf, .. } | LiveShape::Spiral { xf, .. } | LiveShape::Box3d { xf, .. } => {
                 *xf = a * *xf;
                 false
             }
@@ -303,7 +473,7 @@ impl LiveShape {
         let radii: &mut [f64] = match self {
             LiveShape::Rectangle { radii, .. } => radii,
             LiveShape::Polygon { radii, .. } | LiveShape::Path { radii, .. } => radii,
-            LiveShape::Ellipse { .. } | LiveShape::Line { .. } => return false,
+            LiveShape::Ellipse { .. } | LiveShape::Spiral { .. } | LiveShape::Box3d { .. } | LiveShape::Line { .. } => return false,
         };
         if !radii.iter().any(|r| *r > 0.0) || k <= 1e-12 {
             return false;
@@ -314,7 +484,11 @@ impl LiveShape {
     /// Rotation angle of the live shape in degrees, clockwise on the page (y points down).
     pub fn angle_deg(&self) -> f64 {
         match self {
-            LiveShape::Rectangle { xf, .. } | LiveShape::Ellipse { xf, .. } | LiveShape::Polygon { xf, .. } => {
+            LiveShape::Rectangle { xf, .. }
+            | LiveShape::Ellipse { xf, .. }
+            | LiveShape::Polygon { xf, .. }
+            | LiveShape::Spiral { xf, .. }
+            | LiveShape::Box3d { xf, .. } => {
                 let c = xf.as_coeffs();
                 c[1].atan2(c[0]).to_degrees()
             }
@@ -2168,14 +2342,28 @@ mod tests {
 
     #[test]
     fn rect_live_shape_roundtrip() {
-        let l = LiveShape::Rectangle { w: 10.0, h: 20.0, radii: [0.0; 4], kinds: Default::default(), xf: Affine::translate((5.0, 5.0)) };
+        let l = LiveShape::Rectangle {
+            w: 10.0,
+            h: 20.0,
+            radii: [0.0; 4],
+            kinds: Default::default(),
+            xf: Affine::translate((5.0, 5.0)),
+            arc: Default::default(),
+        };
         assert_eq!(l.to_path().bounds(), Some(Rect::new(5.0, 5.0, 15.0, 25.0)));
         assert_eq!(l.label(), "Rectangle");
     }
 
     #[test]
     fn corner_kinds_save_only_when_some_corner_isnt_round() {
-        let mut l = LiveShape::Rectangle { w: 100.0, h: 50.0, radii: [0.0, 10.0, 0.0, 0.0], kinds: Default::default(), xf: Affine::IDENTITY };
+        let mut l = LiveShape::Rectangle {
+            w: 100.0,
+            h: 50.0,
+            radii: [0.0, 10.0, 0.0, 0.0],
+            kinds: Default::default(),
+            xf: Affine::IDENTITY,
+            arc: Default::default(),
+        };
         // Older files read as round.
         let json = serde_json::to_value(&l).unwrap();
         assert!(json.get("kinds").is_none(), "{json}");
@@ -2189,7 +2377,7 @@ mod tests {
         // Polygons saved before Live Corners cut theirs read as sharp; a live path round-trips.
         let p: LiveShape =
             serde_json::from_value(serde_json::json!({"shape": "polygon", "radius": 10.0, "sides": 5, "xf": [1, 0, 0, 1, 0, 0]})).unwrap();
-        assert_eq!(p, LiveShape::Polygon { radius: 10.0, sides: 5, xf: Affine::IDENTITY, radii: vec![], kinds: vec![] });
+        assert_eq!(p, LiveShape::Polygon { radius: 10.0, sides: 5, xf: Affine::IDENTITY, radii: vec![], kinds: vec![], params: Default::default() });
         let star = shapes::star(Point::new(0.0, 0.0), 20.0, 10.0, 5, 0.0);
         let path = LiveShape::Path { base: star, radii: vec![2.0; 10], kinds: vec![] };
         let json = serde_json::to_value(&path).unwrap();
@@ -2221,7 +2409,7 @@ mod tests {
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         // A hexagon of radius 10 at (50, 50), drawn 2× and turned 30° clockwise on the page.
         let xf = Affine::translate((50.0, 50.0)) * Affine::rotate(30f64.to_radians()) * Affine::scale(2.0);
-        let mut p = LiveShape::Polygon { radius: 10.0, sides: 6, xf, radii: vec![], kinds: vec![] };
+        let mut p = LiveShape::Polygon { radius: 10.0, sides: 6, xf, radii: vec![], kinds: vec![], params: Default::default() };
         assert!(close(p.polygon_radius().unwrap(), 20.0) && close(p.polygon_angle().unwrap(), 330.0) && p.polygon_sides_equal());
         p.set_polygon_angle(45.0);
         assert!(close(p.polygon_angle().unwrap(), 45.0));
@@ -2240,13 +2428,13 @@ mod tests {
         let LiveShape::Polygon { xf, .. } = &p else { panic!("polygon") };
         assert_eq!(*xf * Point::ZERO, Point::new(100.0, 50.0));
         // Other shapes have none of it.
-        let e = LiveShape::Ellipse { w: 1.0, h: 1.0, pie: (0.0, 360.0), xf: Affine::IDENTITY };
+        let e = LiveShape::Ellipse { w: 1.0, h: 1.0, pie: (0.0, 360.0), mode: Default::default(), xf: Affine::IDENTITY };
         assert_eq!((e.polygon_radius(), e.polygon_angle()), (None, None));
     }
 
     /// A node holding a live rectangle (`w` × `h`, all radii `r`, placed by `xf`) and its path.
     fn live_rect(w: f64, h: f64, r: f64, xf: Affine) -> Node {
-        let live = LiveShape::Rectangle { w, h, radii: [r; 4], kinds: Default::default(), xf };
+        let live = LiveShape::Rectangle { w, h, radii: [r; 4], kinds: Default::default(), xf, arc: Default::default() };
         let mut n = Node::path(NodeId(1), live.to_path(), Appearance::default_art());
         if let NodeKind::Path { live: slot, .. } = &mut n.kind {
             *slot = Some(Box::new(live));

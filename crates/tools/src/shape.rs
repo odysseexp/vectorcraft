@@ -22,8 +22,22 @@ pub struct ShapeTool {
     pub sides: u32,
     pub points: u32,
     pub corner_radius: f64,
+    pub corner_linked: bool,
+    pub corner_radii: [f64; 4],
     /// Star inner radius as a fraction of the outer radius.
     pub star_ratio: f64,
+    pub shape_mode: &'static str,
+    pub rounded: f64,
+    pub randomized: f64,
+    pub pie_start: f64,
+    pub pie_end: f64,
+    pub ellipse_mode: &'static str,
+    pub angle_x: f64,
+    pub angle_y: f64,
+    pub angle_z: f64,
+    pub parallel_x: bool,
+    pub parallel_y: bool,
+    pub parallel_z: bool,
     /// The star's inner radius held while Ctrl/Cmd is down in a drag.
     inner: Option<f64>,
     snap: DrawSnap,
@@ -44,9 +58,11 @@ impl ShapeTool {
             "ellipse" => "ellipse",
             "polygon" => "polygon",
             "star" => "star",
+            "box3d" => "box3d",
             "lineSegment" => "lineSegment",
             _ => "rectangle",
         };
+        let default_r = if id == "roundedRectangle" { 12.0 } else { 0.0 };
         Self {
             id,
             start: None,
@@ -55,8 +71,22 @@ impl ShapeTool {
             began: false,
             sides: 6,
             points: 5,
-            corner_radius: 12.0,
+            corner_radius: if id == "roundedRectangle" { 12.0 } else { 0.0 },
+            corner_linked: true,
+            corner_radii: [default_r; 4],
             star_ratio: 0.5,
+            shape_mode: if id == "star" { "star" } else { "polygon" },
+            rounded: 0.0,
+            randomized: 0.0,
+            pie_start: 0.0,
+            pie_end: 360.0,
+            ellipse_mode: "whole",
+            angle_x: 30.0,
+            angle_y: 35.0,
+            angle_z: 0.0,
+            parallel_x: true,
+            parallel_y: true,
+            parallel_z: true,
             inner: None,
             snap: DrawSnap::default(),
         }
@@ -85,6 +115,7 @@ impl ShapeTool {
             "ellipse" => "Ellipse",
             "polygon" => "Polygon",
             "star" => "Star",
+            "box3d" => "3D Box",
             "lineSegment" => "Line",
             _ => "Rectangle",
         }
@@ -100,6 +131,14 @@ impl ShapeTool {
         }
     }
 
+    fn append_arc_params(&self, v: &mut Value) {
+        if self.pie_start != 0.0 || self.pie_end != 360.0 || self.ellipse_mode != "whole" {
+            v["pieStart"] = json!(self.pie_start);
+            v["pieEnd"] = json!(self.pie_end);
+            v["ellipseMode"] = json!(self.ellipse_mode);
+        }
+    }
+
     /// The command for a drag from `start` to `p` (snapped: a line's end already keeps Shift's
     /// angle).
     pub fn command(&self, start: Point, p: Point, m: Mods) -> (String, Value) {
@@ -108,27 +147,66 @@ impl ShapeTool {
                 let v = p - start;
                 let r = v.hypot().max(0.01);
                 let rot = if m.shift { 0.0 } else { (v.atan2().to_degrees() + 90.0) % 360.0 };
-                if self.id == "polygon" {
-                    ("shape.polygon".into(), json!({ "cx": start.x, "cy": start.y, "radius": r, "sides": self.sides, "rotation": rot }))
+                let is_star = if self.id == "star" { self.shape_mode != "polygon" } else { self.shape_mode == "star" };
+                if !is_star {
+                    let sides = if self.id == "star" { self.points } else { self.sides };
+                    let mut out = json!({ "cx": start.x, "cy": start.y, "radius": r, "sides": sides, "rotation": rot });
+                    if self.rounded.abs() > 1e-9 {
+                        out["rounded"] = json!(self.rounded);
+                    }
+                    if self.randomized.abs() > 1e-9 {
+                        out["randomized"] = json!(self.randomized);
+                    }
+                    self.append_arc_params(&mut out);
+                    ("shape.polygon".into(), out)
                 } else {
-                    let ratio = if m.alt { straight_ratio(self.points).unwrap_or(self.star_ratio) } else { self.star_ratio };
-                    (
-                        "shape.star".into(),
-                        json!({ "cx": start.x, "cy": start.y, "radius1": r, "radius2": r * ratio, "points": self.points, "rotation": rot }),
-                    )
+                    let pts = if self.id == "polygon" { self.sides } else { self.points };
+                    let ratio = if m.alt { straight_ratio(pts).unwrap_or(self.star_ratio) } else { self.star_ratio };
+                    let mut out = json!({ "cx": start.x, "cy": start.y, "radius1": r, "radius2": r * ratio, "points": pts, "rotation": rot });
+                    if self.rounded.abs() > 1e-9 {
+                        out["rounded"] = json!(self.rounded);
+                    }
+                    if self.randomized.abs() > 1e-9 {
+                        out["randomized"] = json!(self.randomized);
+                    }
+                    self.append_arc_params(&mut out);
+                    ("shape.star".into(), out)
                 }
             }
             "lineSegment" => {
                 let (a, b) = if m.alt { (start - (p - start), p) } else { (start, p) };
                 ("shape.line".into(), json!({ "x1": a.x, "y1": a.y, "x2": b.x, "y2": b.y }))
             }
+            "box3d" => {
+                let r = drag_rect(start, p, m);
+                (
+                    "shape.box3d".into(),
+                    json!({
+                        "x": r.x0,
+                        "y": r.y0,
+                        "width": r.width(),
+                        "height": r.height(),
+                        "angleX": self.angle_x,
+                        "angleY": self.angle_y,
+                        "angleZ": self.angle_z,
+                        "parallelX": self.parallel_x,
+                        "parallelY": self.parallel_y,
+                        "parallelZ": self.parallel_z,
+                    }),
+                )
+            }
             _ => {
                 let r = drag_rect(start, p, m);
                 let cmd = if self.id == "ellipse" { "shape.ellipse" } else { "shape.rectangle" };
                 let mut v = json!({ "x": r.x0, "y": r.y0, "width": r.width(), "height": r.height() });
-                if self.id == "roundedRectangle" {
-                    v["radius"] = json!(self.corner_radius);
+                if self.id != "ellipse" {
+                    if !self.corner_linked && self.corner_radii.iter().any(|rv| *rv > 0.0) {
+                        v["radii"] = json!(self.corner_radii);
+                    } else if self.id == "roundedRectangle" || self.corner_radius > 0.0 {
+                        v["radius"] = json!(self.corner_radius);
+                    }
                 }
+                self.append_arc_params(&mut v);
                 (cmd.into(), v)
             }
         }
@@ -273,14 +351,107 @@ impl Tool for ShapeTool {
         Cursor::Crosshair
     }
     fn options(&self) -> Value {
-        json!({ "sides": self.sides, "points": self.points, "cornerRadius": self.corner_radius, "starRatio": self.star_ratio })
+        json!({
+            "sides": self.sides,
+            "points": self.points,
+            "cornerRadius": self.corner_radius,
+            "cornerLinked": self.corner_linked,
+            "cornerRadii": self.corner_radii,
+            "starRatio": self.star_ratio,
+            "shapeMode": self.shape_mode,
+            "rounded": self.rounded,
+            "randomized": self.randomized,
+            "pieStart": self.pie_start,
+            "pieEnd": self.pie_end,
+            "ellipseMode": self.ellipse_mode,
+            "angleX": self.angle_x,
+            "angleY": self.angle_y,
+            "angleZ": self.angle_z,
+            "parallelX": self.parallel_x,
+            "parallelY": self.parallel_y,
+            "parallelZ": self.parallel_z,
+        })
     }
     fn set_option(&mut self, key: &str, v: &Value) {
         match key {
             "sides" => self.sides = v.as_u64().unwrap_or(6).clamp(3, 1000) as u32,
             "points" => self.points = v.as_u64().unwrap_or(5).clamp(3, 1000) as u32,
-            "cornerRadius" => self.corner_radius = v.as_f64().unwrap_or(12.0).max(0.0),
-            "starRatio" => self.star_ratio = v.as_f64().unwrap_or(0.5).clamp(0.01, 1.0),
+            "cornerRadius" => {
+                let r = v.as_f64().unwrap_or(12.0).max(0.0);
+                self.corner_radius = r;
+                if self.corner_linked {
+                    self.corner_radii = [r; 4];
+                }
+            }
+            "cornerLinked" => {
+                self.corner_linked = v.as_bool().unwrap_or(self.corner_linked);
+                if self.corner_linked {
+                    self.corner_radii = [self.corner_radius; 4];
+                }
+            }
+            "cornerRadii" => {
+                if let Some(arr) = v.as_array()
+                    && arr.len() == 4
+                {
+                    self.corner_radii = [
+                        arr[0].as_f64().unwrap_or(0.0).max(0.0),
+                        arr[1].as_f64().unwrap_or(0.0).max(0.0),
+                        arr[2].as_f64().unwrap_or(0.0).max(0.0),
+                        arr[3].as_f64().unwrap_or(0.0).max(0.0),
+                    ];
+                    self.corner_radius = self.corner_radii[0];
+                }
+            }
+            "starRatio" | "spokeRatio" => self.star_ratio = v.as_f64().unwrap_or(0.5).clamp(0.01, 1.0),
+            "shapeMode" => {
+                self.shape_mode = match v.as_str() {
+                    Some("star") => "star",
+                    _ => "polygon",
+                };
+            }
+            "rounded" => self.rounded = v.as_f64().unwrap_or(0.0).clamp(-10.0, 10.0),
+            "randomized" => self.randomized = v.as_f64().unwrap_or(0.0).clamp(0.0, 10.0),
+            "pieStart" => self.pie_start = v.as_f64().unwrap_or(0.0).rem_euclid(360.0),
+            "pieEnd" => {
+                let e = v.as_f64().unwrap_or(360.0).rem_euclid(360.0);
+                self.pie_end = if e == 0.0 { 360.0 } else { e };
+            }
+            "ellipseMode" => {
+                self.ellipse_mode = match v.as_str() {
+                    Some("slice" | "pie") => "slice",
+                    Some("arc" | "open") => "arc",
+                    Some("chord") => "chord",
+                    _ => "whole",
+                };
+                if self.ellipse_mode == "whole" {
+                    self.pie_start = 0.0;
+                    self.pie_end = 360.0;
+                } else if (self.pie_end - self.pie_start).abs() >= 360.0 - 1e-6 || (self.pie_end - self.pie_start).abs() < 1e-6 {
+                    self.pie_start = 30.0;
+                    self.pie_end = 330.0;
+                }
+            }
+            "angleX" => self.angle_x = v.as_f64().unwrap_or(30.0).rem_euclid(360.0),
+            "angleY" => self.angle_y = v.as_f64().unwrap_or(35.0).rem_euclid(360.0),
+            "angleZ" => self.angle_z = v.as_f64().unwrap_or(0.0).rem_euclid(360.0),
+            "parallelX" => self.parallel_x = v.as_bool().unwrap_or(self.parallel_x),
+            "parallelY" => self.parallel_y = v.as_bool().unwrap_or(self.parallel_y),
+            "parallelZ" => self.parallel_z = v.as_bool().unwrap_or(self.parallel_z),
+            "reset" if v.as_bool() == Some(true) => {
+                self.corner_radius = 0.0;
+                self.corner_radii = [0.0; 4];
+                self.rounded = 0.0;
+                self.randomized = 0.0;
+                self.pie_start = 0.0;
+                self.pie_end = 360.0;
+                self.ellipse_mode = "whole";
+                self.angle_x = 30.0;
+                self.angle_y = 35.0;
+                self.angle_z = 0.0;
+                self.parallel_x = true;
+                self.parallel_y = true;
+                self.parallel_z = true;
+            }
             _ => {}
         }
     }

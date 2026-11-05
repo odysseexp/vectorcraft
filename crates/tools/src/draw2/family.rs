@@ -22,6 +22,10 @@ pub struct FamilyTool {
     pub closed: bool,
     pub decay: f64,
     pub segments: u32,
+    pub turns: f64,
+    pub divergence: f64,
+    pub inner_radius: f64,
+    pub configured_spiral: bool,
     pub clockwise: bool,
     /// Rows / concentric dividers.
     pub rows: u32,
@@ -55,6 +59,10 @@ impl FamilyTool {
             closed: false,
             decay: 80.0,
             segments: 10,
+            turns: 3.0,
+            divergence: 1.0,
+            inner_radius: 0.0,
+            configured_spiral: false,
             clockwise: true,
             rows: 5,
             columns: 5,
@@ -86,10 +94,14 @@ impl FamilyTool {
         match self.id {
             "spiral" => {
                 let r = p.distance(start).max(0.01);
-                (
-                    "shape.spiral".into(),
-                    json!({"cx": start.x, "cy": start.y, "radius": r, "decay": self.decay, "segments": self.segments, "clockwise": self.clockwise}),
-                )
+                let mut out =
+                    json!({"cx": start.x, "cy": start.y, "radius": r, "decay": self.decay, "segments": self.segments, "clockwise": self.clockwise});
+                if self.configured_spiral {
+                    out["turns"] = json!(self.turns);
+                    out["divergence"] = json!(self.divergence);
+                    out["innerRadius"] = json!(self.inner_radius);
+                }
+                ("shape.spiral".into(), out)
             }
             // The grids: the dragged box with the tool's options.
             "rectangularGrid" | "polarGrid" => {
@@ -212,7 +224,14 @@ impl Tool for FamilyTool {
     }
     fn options(&self) -> Value {
         match self.id {
-            "spiral" => json!({"decay": self.decay, "segments": self.segments, "clockwise": self.clockwise}),
+            "spiral" => json!({
+                "decay": self.decay,
+                "segments": self.segments,
+                "turns": self.turns,
+                "divergence": self.divergence,
+                "innerRadius": self.inner_radius,
+                "clockwise": self.clockwise,
+            }),
             "rectangularGrid" => json!({
                 "rows": self.rows, "columns": self.columns, "rowSkew": self.skew[0], "columnSkew": self.skew[1], "frame": self.frame, "fill": self.fill,
             }),
@@ -227,6 +246,24 @@ impl Tool for FamilyTool {
             "closed" => self.closed = v.as_bool().unwrap_or(self.closed),
             "decay" => self.decay = v.as_f64().unwrap_or(self.decay).clamp(5.0, 150.0),
             "segments" => self.segments = v.as_u64().unwrap_or(10).clamp(2, 1000) as u32,
+            "turns" => {
+                self.turns = v.as_f64().unwrap_or(self.turns).clamp(0.01, 1024.0);
+                self.configured_spiral = true;
+            }
+            "divergence" => {
+                self.divergence = v.as_f64().unwrap_or(self.divergence).clamp(0.0, 1000.0);
+                self.configured_spiral = true;
+            }
+            "innerRadius" => {
+                self.inner_radius = v.as_f64().unwrap_or(self.inner_radius).clamp(0.0, 0.99);
+                self.configured_spiral = true;
+            }
+            "reset" if v.as_bool() == Some(true) => {
+                self.turns = 3.0;
+                self.divergence = 1.0;
+                self.inner_radius = 0.0;
+                self.configured_spiral = false;
+            }
             "clockwise" => self.clockwise = v.as_bool().unwrap_or(self.clockwise),
             "rows" | "concentric" => self.rows = v.as_u64().unwrap_or(5).min(999) as u32,
             "columns" | "radial" => self.columns = v.as_u64().unwrap_or(5).min(999) as u32,

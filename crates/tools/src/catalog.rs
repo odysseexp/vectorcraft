@@ -54,6 +54,7 @@ pub const TOOL_GROUPS: &[&[ToolInfo]] = &[
         t("ellipse", "Ellipse Tool", Some("L"), "tool-ellipse"),
         t("polygon", "Polygon Tool", None, "tool-polygon"),
         t("star", "Star Tool", None, "tool-star"),
+        t("box3d", "3D Box Tool", None, "tool-box3d"),
         t("flare", "Flare Tool", None, "tool-flare"),
     ],
     &[t("paintbrush", "Paintbrush Tool", Some("B"), "tool-brush"), t("blobBrush", "Blob Brush Tool", Some("Shift+B"), "tool-blob-brush")],

@@ -39,6 +39,7 @@ pub const BASIC: &[(&str, &[&[&str]])] = &[
             &["rectangle", "roundedRectangle", "star", "lineSegment", "arc", "spiral", "rectangularGrid", "polarGrid", "flare"],
             &["ellipse"],
             &["polygon"],
+            &["box3d"],
             &["shaper"],
         ],
     ),
@@ -65,6 +66,11 @@ pub const BASIC: &[(&str, &[&[&str]])] = &[
     ("Navigate", &[&["zoom"], &["hand", "printTiling"], &["rotateView"]]),
     ("Color", &[&["gradient", "mesh"], &["eyedropper", "measure"]]),
 ];
+
+/// Whether `tool` is one of the shape creation tools with a dedicated customization bar.
+pub fn is_shape_tool(tool: &str) -> bool {
+    matches!(tool, "rectangle" | "roundedRectangle" | "ellipse" | "polygon" | "star" | "box3d" | "spiral")
+}
 
 pub(crate) fn tip(t: &ToolInfo) -> String {
     match crate::shortcut_editor::tool_shortcut(t.id) {
@@ -378,11 +384,15 @@ pub fn open_options(app: &mut VectorcraftApp, tool: &str) -> Result<serde_json::
 }
 
 /// The active tool's options in the Control bar: Mirror & Cut's axis and the side it keeps, Puppet
-/// Warp's mesh and pins (set through `tool.setOption`). The Artboard tool's options are drawn by
+/// Warp's mesh and pins, and each shape tool's customization controls (set through `tool.setOption`
+/// and `object.setLiveShape`). The Artboard tool's options are drawn by
 /// [`crate::panels::artboards::control_bar`].
 pub fn control_bar_options(app: &mut VectorcraftApp, ui: &mut Ui) {
     if app.session.tool_id() == "dimension" {
         return crate::dialogs::dimension::controls(app, ui);
+    }
+    if is_shape_tool(app.session.tool_id()) {
+        return shape_control_bar(app, ui);
     }
     /// (value, label) of each choice.
     type Choices = &'static [(&'static str, &'static str)];
@@ -411,6 +421,419 @@ pub fn control_bar_options(app: &mut VectorcraftApp, ui: &mut Ui) {
         }
     }
     ui.separator();
+}
+
+/// A selectable compact button in the shape customization bar.
+fn shape_mode_button(ui: &mut Ui, label: &str, tip: &str, selected: bool, width: f32) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let text = crate::i18n::t(label);
+    let tip_text = crate::i18n::t(tip);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click());
+    let bg = if selected {
+        t.tool_active
+    } else if resp.hovered() {
+        t.hover
+    } else {
+        t.button
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
+    ui.painter().with_clip_rect(rect).text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(11.5),
+        if selected { t.text_strong } else { t.text },
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, text));
+    resp.on_hover_text(tip_text)
+}
+
+fn ellipse_mode_str(m: vectorcraft_geom::shapes::EllipseMode) -> &'static str {
+    use vectorcraft_geom::shapes::EllipseMode;
+    match m {
+        EllipseMode::Slice => "slice",
+        EllipseMode::Arc => "arc",
+        EllipseMode::Chord => "chord",
+        EllipseMode::Whole => "whole",
+    }
+}
+
+fn parse_ellipse_mode(s: &str) -> Option<vectorcraft_geom::shapes::EllipseMode> {
+    use vectorcraft_geom::shapes::EllipseMode;
+    match s {
+        "slice" => Some(EllipseMode::Slice),
+        "arc" => Some(EllipseMode::Arc),
+        "chord" => Some(EllipseMode::Chord),
+        "whole" => Some(EllipseMode::Whole),
+        _ => None,
+    }
+}
+
+/// Arc / Slice / Chord / Whole opening controls shared by Circle/Ellipse, Rectangle/Square, and Polygon/Star.
+fn shape_arc_controls(
+    app: &mut VectorcraftApp,
+    ui: &mut Ui,
+    id_prefix: &str,
+    start: f64,
+    end: f64,
+    mode: vectorcraft_geom::shapes::EllipseMode,
+    has_live: bool,
+) {
+    use vectorcraft_geom::shapes::EllipseMode;
+    let t = Tokens::get(ui.ctx());
+    for (lbl, key, val) in [("Start:", "pieStart", start), ("End:", "pieEnd", end)] {
+        widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+        if let Some(a) = widgets::plain_field(ui, (id_prefix, key), val, "°", 1, 52.0) {
+            app.run("tool.setOption", json!({ "key": key, "value": a })).ok();
+            let (ns, ne) = if key == "pieStart" { (a, end) } else { (start, a) };
+            let next_mode = if mode == EllipseMode::Whole && (ne - ns).abs() < 360.0 - 1e-4 {
+                app.run("tool.setOption", json!({ "key": "ellipseMode", "value": "slice" })).ok();
+                "slice"
+            } else {
+                ellipse_mode_str(mode)
+            };
+            if has_live {
+                app.run("object.setLiveShape", json!({ key: a, "ellipseMode": next_mode })).ok();
+            }
+        }
+    }
+    let modes = [
+        (EllipseMode::Slice, "Slice", "Switch to slice (closed shape with two radii)", 40.0),
+        (EllipseMode::Arc, "Arc", "Switch to arc (unclosed shape)", 34.0),
+        (EllipseMode::Chord, "Chord", "Switch to chord (closed shape with straight cut)", 44.0),
+        (EllipseMode::Whole, "Whole", "Make the shape whole (full closed shape)", 44.0),
+    ];
+    for (m, lbl, tip, w) in modes {
+        if shape_mode_button(ui, lbl, tip, mode == m, w).clicked() {
+            let (ns, ne) = if m == EllipseMode::Whole {
+                (0.0, 360.0)
+            } else if (end - start).abs() >= 360.0 - 1e-4 || (end - start).abs() < 1e-4 {
+                (0.0, 270.0)
+            } else {
+                (start, end)
+            };
+            app.run("tool.setOption", json!({ "key": "ellipseMode", "value": ellipse_mode_str(m) })).ok();
+            app.run("tool.setOption", json!({ "key": "pieStart", "value": ns })).ok();
+            app.run("tool.setOption", json!({ "key": "pieEnd", "value": ne })).ok();
+            if has_live {
+                app.run("object.setLiveShape", json!({ "ellipseMode": ellipse_mode_str(m), "pieStart": ns, "pieEnd": ne })).ok();
+            }
+        }
+    }
+}
+
+/// Context-sensitive shape customization bar for Circle/Ellipse, Square/Rectangle, Polygon,
+/// Star/Triangle, 3D Box, and Spiral.
+fn shape_control_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
+    use vectorcraft_doc::{LiveShape, NodeKind};
+    use vectorcraft_geom::shapes::EllipseMode;
+
+    let tool = app.session.tool_id();
+    let opts = app.session.tool_options();
+    let units = app.session.general_unit();
+    let t = Tokens::get(ui.ctx());
+    let first = app.session.active().and_then(|st| st.selection.objects.first().and_then(|id| st.doc.node(*id))).cloned();
+
+    match tool {
+        "ellipse" => {
+            let live_ellipse = first.as_ref().and_then(|n| match &n.kind {
+                NodeKind::Path { live: Some(l), .. } => match &**l {
+                    LiveShape::Ellipse { w, h, pie, mode, .. } => Some((*w / 2.0, *h / 2.0, *pie, *mode)),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let has_live = live_ellipse.is_some();
+            ui.label(egui::RichText::new(crate::i18n::t(if has_live { "Change:" } else { "New:" })).size(11.5).color(t.text_strong));
+            let rx = live_ellipse.map_or_else(|| opts["rx"].as_f64().unwrap_or(50.0), |(rx, _, _, _)| rx);
+            let ry = live_ellipse.map_or_else(|| opts["ry"].as_f64().unwrap_or(50.0), |(_, ry, _, _)| ry);
+            let (start, end) = live_ellipse
+                .map_or_else(|| (opts["pieStart"].as_f64().unwrap_or(0.0), opts["pieEnd"].as_f64().unwrap_or(360.0)), |(_, _, pie, _)| pie);
+            let mode = live_ellipse
+                .map_or_else(|| opts["ellipseMode"].as_str().and_then(parse_ellipse_mode).unwrap_or(EllipseMode::Whole), |(_, _, _, m)| m);
+            for (lbl, key, val) in [("Rx:", "rx", rx), ("Ry:", "ry", ry)] {
+                widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+                if let Some(v) = widgets::num_field(ui, ("cb-ellipse", key), Some(val), units, 58.0) {
+                    let v = v.max(0.5);
+                    app.run("tool.setOption", json!({ "key": key, "value": v })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ key: v })).ok();
+                    }
+                }
+            }
+            shape_arc_controls(app, ui, "cb-ellipse", start, end, mode, has_live);
+            ui.separator();
+        }
+        "rectangle" | "roundedRectangle" => {
+            let live_rect = first.as_ref().and_then(|n| match &n.kind {
+                NodeKind::Path { live: Some(l), .. } => match &**l {
+                    LiveShape::Rectangle { w, h, radii, arc, .. } => Some((*w, *h, *radii, *arc)),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let has_live = live_rect.is_some();
+            ui.label(egui::RichText::new(crate::i18n::t(if has_live { "Change:" } else { "New:" })).size(11.5).color(t.text_strong));
+            let (w_val, h_val) = live_rect.map_or((100.0, 100.0), |(w, h, _, _)| (w, h));
+            if has_live {
+                for (lbl, key, val) in [("W:", "width", w_val), ("H:", "height", h_val)] {
+                    widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+                    if let Some(v) = widgets::num_field(ui, ("cb-rect", key), Some(val), units, 54.0) {
+                        app.run("object.setLiveShape", json!({ key: v.max(1.0) })).ok();
+                    }
+                }
+            }
+            let tool_radii = opts["cornerRadii"]
+                .as_array()
+                .and_then(|a| {
+                    if a.len() == 4 {
+                        Some([a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0), a[2].as_f64().unwrap_or(0.0), a[3].as_f64().unwrap_or(0.0)])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or([opts["cornerRadius"].as_f64().unwrap_or(12.0); 4]);
+            let radii = live_rect.map_or(tool_radii, |(_, _, r, _)| r);
+            let linked = opts["cornerLinked"].as_bool().unwrap_or(true);
+            if shape_mode_button(ui, if linked { "Sym" } else { "4-Corner" }, "Toggle symmetric (linked) vs independent corner radii", linked, 56.0)
+                .clicked()
+            {
+                let next = !linked;
+                app.run("tool.setOption", json!({ "key": "cornerLinked", "value": next })).ok();
+                if next {
+                    let r0 = radii[0];
+                    app.run("tool.setOption", json!({ "key": "cornerRadius", "value": r0 })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ "radius": r0 })).ok();
+                    }
+                }
+            }
+            if linked {
+                widgets::field_label(ui, egui::RichText::new(crate::i18n::t("R:")).size(11.5).color(t.text_dim));
+                if let Some(r) = widgets::num_field(ui, ("cb-rect", "radius"), Some(radii[0]), units, 52.0) {
+                    let r = r.max(0.0);
+                    app.run("tool.setOption", json!({ "key": "cornerRadius", "value": r })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ "radius": r })).ok();
+                    }
+                }
+            } else {
+                for (i, lbl) in ["TL:", "TR:", "BR:", "BL:"].into_iter().enumerate() {
+                    widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+                    if let Some(r) = widgets::num_field(ui, ("cb-rect-c", i), Some(radii[i]), units, 44.0) {
+                        let mut next = radii;
+                        next[i] = r.max(0.0);
+                        app.run("tool.setOption", json!({ "key": "cornerRadii", "value": next })).ok();
+                        if has_live {
+                            app.run("object.setLiveShape", json!({ "radii": next })).ok();
+                        }
+                    }
+                }
+            }
+            if shape_mode_button(ui, "Sharp", "Make corners sharp (radius = 0)", radii.iter().all(|&r| r <= 1e-4), 42.0).clicked() {
+                app.run("tool.setOption", json!({ "key": "cornerRadius", "value": 0.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "cornerRadii", "value": [0.0, 0.0, 0.0, 0.0] })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "radius": 0.0 })).ok();
+                }
+            }
+            let (start, end, mode) = live_rect.map_or_else(
+                || {
+                    (
+                        opts["pieStart"].as_f64().unwrap_or(0.0),
+                        opts["pieEnd"].as_f64().unwrap_or(360.0),
+                        opts["ellipseMode"].as_str().and_then(parse_ellipse_mode).unwrap_or(EllipseMode::Whole),
+                    )
+                },
+                |(_, _, _, arc)| (arc.pie.0, arc.pie.1, arc.mode),
+            );
+            shape_arc_controls(app, ui, "cb-rect", start, end, mode, has_live);
+            ui.separator();
+        }
+        "polygon" | "star" => {
+            let live_poly = first.as_ref().and_then(|n| match &n.kind {
+                NodeKind::Path { live: Some(l), .. } => match &**l {
+                    LiveShape::Polygon { sides, params, .. } => Some((*sides, *params)),
+                    _ => None,
+                },
+                NodeKind::Path { path, live: None, .. } => LiveShape::detect_star_from_path(path).and_then(|l| match l {
+                    LiveShape::Polygon { sides, params, .. } => Some((sides, params)),
+                    _ => None,
+                }),
+                _ => None,
+            });
+            let has_live = live_poly.is_some();
+            ui.label(egui::RichText::new(crate::i18n::t(if has_live { "Change:" } else { "New:" })).size(11.5).color(t.text_strong));
+            let is_star = live_poly.as_ref().map_or_else(|| opts["shapeMode"].as_str().unwrap_or(tool) == "star", |(_, p)| p.spoke_ratio.is_some());
+            for (m_id, lbl, tip, active) in
+                [("polygon", "Polygon", "Regular polygon (one handle)", !is_star), ("star", "Star", "Star (two handles with spoke ratio)", is_star)]
+            {
+                if shape_mode_button(ui, lbl, tip, active, 54.0).clicked() {
+                    app.run("tool.setOption", json!({ "key": "shapeMode", "value": m_id })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ "shapeMode": m_id })).ok();
+                    }
+                }
+            }
+            let corners = live_poly.as_ref().map_or_else(
+                || opts["points"].as_u64().or_else(|| opts["sides"].as_u64()).unwrap_or(if is_star { 5 } else { 6 }) as u32,
+                |(s, _)| *s,
+            );
+            let spoke = live_poly.as_ref().map_or_else(|| opts["spokeRatio"].as_f64().unwrap_or(0.5), |(_, p)| p.spoke_ratio.unwrap_or(0.5));
+            let rounded = live_poly.as_ref().map_or_else(|| opts["rounded"].as_f64().unwrap_or(0.0), |(_, p)| p.rounded);
+            let randomized = live_poly.as_ref().map_or_else(|| opts["randomized"].as_f64().unwrap_or(0.0), |(_, p)| p.randomized);
+            widgets::field_label(ui, egui::RichText::new(crate::i18n::t("Corners:")).size(11.5).color(t.text_dim));
+            if let Some(c) = widgets::plain_field(ui, ("cb-poly", "corners"), f64::from(corners), "", 0, 44.0) {
+                let c = (c.round() as i64).clamp(3, 1000) as u32;
+                app.run("tool.setOption", json!({ "key": "points", "value": c })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "points": c })).ok();
+                }
+            }
+            if is_star {
+                widgets::field_label(ui, egui::RichText::new(crate::i18n::t("Spoke:")).size(11.5).color(t.text_dim));
+                if let Some(sr) = widgets::plain_field(ui, ("cb-poly", "spoke"), spoke, "", 3, 48.0) {
+                    let sr = sr.clamp(0.01, 1.0);
+                    app.run("tool.setOption", json!({ "key": "spokeRatio", "value": sr })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ "spokeRatio": sr })).ok();
+                    }
+                }
+            }
+            widgets::field_label(ui, egui::RichText::new(crate::i18n::t("Rounded:")).size(11.5).color(t.text_dim));
+            if let Some(rn) = widgets::plain_field(ui, ("cb-poly", "rounded"), rounded, "", 2, 46.0) {
+                let rn = rn.clamp(-10.0, 10.0);
+                app.run("tool.setOption", json!({ "key": "rounded", "value": rn })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "rounded": rn })).ok();
+                }
+            }
+            widgets::field_label(ui, egui::RichText::new(crate::i18n::t("Randomized:")).size(11.5).color(t.text_dim));
+            if let Some(rd) = widgets::plain_field(ui, ("cb-poly", "randomized"), randomized, "", 2, 46.0) {
+                let rd = rd.clamp(0.0, 10.0);
+                app.run("tool.setOption", json!({ "key": "randomized", "value": rd })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "randomized": rd })).ok();
+                }
+            }
+            let (start, end, mode) = live_poly.map_or_else(
+                || {
+                    (
+                        opts["pieStart"].as_f64().unwrap_or(0.0),
+                        opts["pieEnd"].as_f64().unwrap_or(360.0),
+                        opts["ellipseMode"].as_str().and_then(parse_ellipse_mode).unwrap_or(EllipseMode::Whole),
+                    )
+                },
+                |(_, p)| (p.arc.pie.0, p.arc.pie.1, p.arc.mode),
+            );
+            shape_arc_controls(app, ui, "cb-poly", start, end, mode, has_live);
+            if shape_mode_button(ui, "Reset", "Reset shape parameters to defaults", false, 44.0).clicked() {
+                app.run("tool.setOption", json!({ "key": "rounded", "value": 0.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "randomized", "value": 0.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "spokeRatio", "value": 0.5 })).ok();
+                app.run("tool.setOption", json!({ "key": "ellipseMode", "value": "whole" })).ok();
+                app.run("tool.setOption", json!({ "key": "pieStart", "value": 0.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "pieEnd", "value": 360.0 })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "reset": true })).ok();
+                }
+            }
+            ui.separator();
+        }
+        "box3d" => {
+            let live_box = first.as_ref().and_then(|n| match &n.kind {
+                NodeKind::Path { live: Some(l), .. } => match &**l {
+                    LiveShape::Box3d { angle_x, angle_y, angle_z, parallel_x, parallel_y, parallel_z, .. } => {
+                        Some((*angle_x, *angle_y, *angle_z, *parallel_x, *parallel_y, *parallel_z))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            });
+            let has_live = live_box.is_some();
+            ui.label(egui::RichText::new(crate::i18n::t(if has_live { "Change:" } else { "New:" })).size(11.5).color(t.text_strong));
+            let (ax, ay, az, px, py, pz) = live_box.unwrap_or_else(|| {
+                (
+                    opts["angleX"].as_f64().unwrap_or(30.0),
+                    opts["angleY"].as_f64().unwrap_or(270.0),
+                    opts["angleZ"].as_f64().unwrap_or(330.0),
+                    opts["parallelX"].as_bool().unwrap_or(false),
+                    opts["parallelY"].as_bool().unwrap_or(true),
+                    opts["parallelZ"].as_bool().unwrap_or(false),
+                )
+            });
+            for (lbl, a_key, p_key, a_val, p_val) in [
+                ("Angle X:", "angleX", "parallelX", ax, px),
+                ("Angle Y:", "angleY", "parallelY", ay, py),
+                ("Angle Z:", "angleZ", "parallelZ", az, pz),
+            ] {
+                widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+                if let Some(a) = widgets::plain_field(ui, ("cb-box3d", a_key), a_val, "°", 1, 56.0) {
+                    app.run("tool.setOption", json!({ "key": a_key, "value": a })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ a_key: a })).ok();
+                    }
+                }
+                if shape_mode_button(ui, "//", "Toggle parallel lines (vanishing point at infinity)", p_val, 24.0).clicked() {
+                    let next = !p_val;
+                    app.run("tool.setOption", json!({ "key": p_key, "value": next })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ p_key: next })).ok();
+                    }
+                }
+            }
+            if shape_mode_button(ui, "Reset", "Reset 3D box angles to defaults", false, 44.0).clicked() {
+                app.run("tool.setOption", json!({ "key": "angleX", "value": 30.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "angleY", "value": 270.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "angleZ", "value": 330.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "parallelX", "value": false })).ok();
+                app.run("tool.setOption", json!({ "key": "parallelY", "value": true })).ok();
+                app.run("tool.setOption", json!({ "key": "parallelZ", "value": false })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "reset": true })).ok();
+                }
+            }
+            ui.separator();
+        }
+        "spiral" => {
+            let live_spiral = first.as_ref().and_then(|n| match &n.kind {
+                NodeKind::Path { live: Some(l), .. } => match &**l {
+                    LiveShape::Spiral { turns, divergence, inner_radius, .. } => Some((*turns, *divergence, *inner_radius)),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let has_live = live_spiral.is_some();
+            ui.label(egui::RichText::new(crate::i18n::t(if has_live { "Change:" } else { "New:" })).size(11.5).color(t.text_strong));
+            let (turns, divergence, inner_radius) = live_spiral.unwrap_or_else(|| {
+                (opts["turns"].as_f64().unwrap_or(3.0), opts["divergence"].as_f64().unwrap_or(1.0), opts["innerRadius"].as_f64().unwrap_or(0.0))
+            });
+            for (lbl, key, val, dec, min_v, max_v) in [
+                ("Turns:", "turns", turns, 2, 0.01, 1024.0),
+                ("Divergence:", "divergence", divergence, 3, 0.0, 1000.0),
+                ("Inner Radius:", "innerRadius", inner_radius, 3, 0.0, 0.999),
+            ] {
+                widgets::field_label(ui, egui::RichText::new(crate::i18n::t(lbl)).size(11.5).color(t.text_dim));
+                if let Some(v) = widgets::plain_field(ui, ("cb-spiral", key), val, "", dec, 56.0) {
+                    let v = v.clamp(min_v, max_v);
+                    app.run("tool.setOption", json!({ "key": key, "value": v })).ok();
+                    if has_live {
+                        app.run("object.setLiveShape", json!({ key: v })).ok();
+                    }
+                }
+            }
+            if shape_mode_button(ui, "Reset", "Reset spiral parameters to defaults", false, 44.0).clicked() {
+                app.run("tool.setOption", json!({ "key": "turns", "value": 3.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "divergence", "value": 1.0 })).ok();
+                app.run("tool.setOption", json!({ "key": "innerRadius", "value": 0.0 })).ok();
+                if has_live {
+                    app.run("object.setLiveShape", json!({ "reset": true })).ok();
+                }
+            }
+            ui.separator();
+        }
+        _ => {}
+    }
 }
 
 /// Crop Image's box: its centre (X, Y) and size (W, H) in the general unit, set through the tool's
@@ -1613,5 +2036,99 @@ pub(crate) mod tests {
         assert_eq!(role_and_state(&strip, &name("star")), (Role::Button, Some(Toggled::True)));
         assert_eq!(role_and_state(&strip, "Put back in the toolbar"), (Role::Button, None));
         assert_eq!(role_and_state(&strip, "Drag to move"), (Role::Button, None));
+    }
+
+    #[test]
+    fn the_control_bar_switches_to_each_shape_tools_customization_controls() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 400, "height": 400})).unwrap();
+
+        for (tool, expected_labels) in [
+            ("ellipse", &["New:", "Rx:", "Ry:", "Start:", "End:", "Slice", "Arc", "Chord", "Whole"][..]),
+            ("rectangle", &["New:", "Sym", "R:", "Sharp", "Start:", "End:", "Slice", "Arc", "Chord", "Whole"][..]),
+            ("polygon", &["New:", "Polygon", "Star", "Corners:", "Rounded:", "Randomized:", "Slice", "Arc", "Chord", "Whole", "Reset"][..]),
+            ("star", &["New:", "Polygon", "Star", "Corners:", "Spoke:", "Rounded:", "Randomized:", "Slice", "Arc", "Chord", "Whole", "Reset"][..]),
+            ("box3d", &["New:", "Angle X:", "Angle Y:", "Angle Z:", "//", "Reset"][..]),
+            ("spiral", &["New:", "Turns:", "Divergence:", "Inner Radius:", "Reset"][..]),
+        ] {
+            app.select_tool(tool);
+            let text = crate::tests_labels::painted_text(&mut app, crate::chrome::control_bar);
+            for label in expected_labels {
+                assert!(text.lines().any(|l| l == *label), "{tool} missing {label} in:\n{text}");
+            }
+        }
+
+        // 1. Circle / Ellipse: Slice (pie), Arc (open line), Chord (straight cut), Whole
+        app.select_tool("ellipse");
+        let eid = app.run("shape.ellipse", json!({"x": 20, "y": 20, "width": 100, "height": 100})).unwrap()["id"].as_u64().unwrap();
+        let text = crate::tests_labels::painted_text(&mut app, crate::chrome::control_bar);
+        assert!(text.lines().any(|l| l == "Change:"), "selected ellipse shows Change:");
+        app.run("object.setLiveShape", json!({"pieStart": 30, "pieEnd": 300, "ellipseMode": "slice"})).unwrap();
+        app.run("object.setLiveShape", json!({"ellipseMode": "arc"})).unwrap();
+        let p_arc = match &app.session.doc().unwrap().doc.node(vectorcraft_doc::NodeId(eid)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Path { path, .. } => path.clone(),
+            _ => panic!("expected path"),
+        };
+        assert!(!p_arc.subpaths[0].closed, "Arc mode produces an open elliptical line");
+        app.run("object.setLiveShape", json!({"ellipseMode": "chord"})).unwrap();
+        let p_chord = match &app.session.doc().unwrap().doc.node(vectorcraft_doc::NodeId(eid)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Path { path, .. } => path.clone(),
+            _ => panic!("expected path"),
+        };
+        assert!(p_chord.subpaths[0].closed, "Chord mode produces a closed straight-cut circle");
+        app.run("object.setLiveShape", json!({"ellipseMode": "whole"})).unwrap();
+
+        // 2. Square / Rectangle: symmetric corners, unlinked 4 corners, and circle-style opening
+        app.select_tool("rectangle");
+        let rid = app.run("shape.rectangle", json!({"x": 20, "y": 20, "width": 100, "height": 80, "radius": 12})).unwrap()["id"].as_u64().unwrap();
+        app.run("object.setLiveShape", json!({"radii": [20.0, 5.0, 15.0, 0.0], "pieStart": 0, "pieEnd": 270, "ellipseMode": "slice"})).unwrap();
+        let p_rect = match &app.session.doc().unwrap().doc.node(vectorcraft_doc::NodeId(rid)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Path { path, live: Some(l), .. } => {
+                if let vectorcraft_doc::LiveShape::Rectangle { radii, arc, .. } = &**l {
+                    assert_eq!(*radii, [20.0, 5.0, 15.0, 0.0]);
+                    assert_eq!(arc.mode, vectorcraft_geom::shapes::EllipseMode::Slice);
+                } else {
+                    panic!("expected live rectangle");
+                }
+                path.clone()
+            }
+            _ => panic!("expected live rectangle path"),
+        };
+        assert!(!p_rect.subpaths.is_empty());
+
+        // 3. Polygon & Star: high point counts, spoke ratio, rounded, randomized, and opening
+        app.select_tool("polygon");
+        app.run("shape.polygon", json!({"cx": 150, "cy": 150, "radius": 60, "sides": 8, "rounded": 0.2, "randomized": 0.1})).unwrap();
+        app.run(
+            "object.setLiveShape",
+            json!({"points": 64, "shapeMode": "star", "spokeRatio": 0.6, "ellipseMode": "chord", "pieStart": 0, "pieEnd": 240}),
+        )
+        .unwrap();
+
+        // 4. 3D Rotatable Box
+        app.select_tool("box3d");
+        let bid = app.run("shape.box3d", json!({"x": 50, "y": 50, "width": 120, "height": 100, "angleX": 30, "angleY": 270, "angleZ": 330})).unwrap()
+            ["id"]
+            .as_u64()
+            .unwrap();
+        app.run("object.setLiveShape", json!({"angleX": 45, "angleY": 260, "angleZ": 315, "parallelX": false})).unwrap();
+        let p_box = match &app.session.doc().unwrap().doc.node(vectorcraft_doc::NodeId(bid)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Path { path, .. } => path.clone(),
+            _ => panic!("expected 3d box path"),
+        };
+        assert!(p_box.subpaths.len() >= 2, "3D box generates multiple visible quad faces");
+
+        // 5. Configurable Spiral
+        app.select_tool("spiral");
+        let spid =
+            app.run("shape.spiral", json!({"cx": 200, "cy": 200, "radius": 80, "turns": 4.0, "divergence": 1.5, "innerRadius": 0.25})).unwrap()["id"]
+                .as_u64()
+                .unwrap();
+        app.run("object.setLiveShape", json!({"turns": 5.5, "divergence": 1.2, "innerRadius": 0.1})).unwrap();
+        let p_spiral = match &app.session.doc().unwrap().doc.node(vectorcraft_doc::NodeId(spid)).unwrap().kind {
+            vectorcraft_doc::NodeKind::Path { path, .. } => path.clone(),
+            _ => panic!("expected spiral path"),
+        };
+        assert!(!p_spiral.subpaths[0].closed);
     }
 }

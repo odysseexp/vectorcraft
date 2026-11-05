@@ -1443,7 +1443,7 @@ impl VectorcraftApp {
         let t = theme::Tokens::get(&ctx);
         if self.ui.screen_mode < 2 {
             chrome::app_bar(self, ui);
-            if self.ui.control_bar {
+            if self.ui.control_bar || (self.ui.toolbar && toolbar::is_shape_tool(self.session.tool_id())) {
                 chrome::control_bar(self, ui);
             }
         }
